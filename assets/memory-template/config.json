@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "record_mode": "standard",
+  "budgets": {
+    "current": {
+      "target": 450,
+      "hard": 600
+    },
+    "root_index": {
+      "target": 1500,
+      "hard": 2000
+    },
+    "topic_index": {
+      "target": 1500,
+      "hard": 2000
+    }
+  },
+  "tokenizer": {
+    "encoding": "o200k_base",
+    "fallback": "max_utf8_bytes_or_chars_div_3"
+  },
+  "retrieval": {
+    "normal_top_k": 3,
+    "expanded_top_k": 8
+  }
+}

@@ -10,7 +10,7 @@ The filesystem is a context repository with distinct memory functions:
 | --- | --- | --- |
 | Discovery | `PROJECTS.md`, `project.md` | Locate the correct project and authoritative sources without scanning everything. |
 | Working memory | `current.md` | Keep the active goal, hard constraints, and immediate continuation small. |
-| Routing | `index.md`, `anchors.md` | Find relevant detail using stable semantic names. |
+| Routing | root `index.md`, `indexes/*.md`, `anchors.md` | Bound active routing while preserving historical reachability. |
 | Semantic memory | decisions, issues, conflicts | Preserve what is believed, chosen, unresolved, or contradictory. |
 | Procedural memory | lessons | Reuse scoped prevention and verification behavior. |
 | Episodic memory | tasks, handoffs, archive | Preserve what happened and where continuation boundaries occurred. |
@@ -50,23 +50,23 @@ Recency alone does not prove truth. Preserve superseded decisions and temporal h
 
 ## Retrieval design
 
-Use constrained, explainable retrieval:
+Use constrained, explainable retrieval. V3 follows `current -> active root index -> one topic shard -> rank up to 3 candidates -> open one at a time`, expanding the candidate limit to 8 only when coverage is insufficient:
 
 1. project namespace filter;
 2. record status and type filter;
 3. exact ID, anchor, filename, and symptom matches;
 4. lexical or optional semantic similarity;
 5. reranking by scope, evidence quality, and temporal validity;
-6. agent reads selected canonical records and explains applicability.
+6. agent opens rank 1, assesses coverage, and reads the next canonical record only for a named remaining gap.
 
-Keep relevance and severity separate. Limit returned candidates, but disclose possibly relevant unread records in `CoverageReport`. Record the projection snapshot so stale indexes are detectable.
+Keep relevance and severity separate. A returned candidate list is an upper bound, not a batch read list. Topic-shard `snapshot_id` records when that shard last changed; it may be older than the current boundary, avoiding a rewrite of every shard on every update. Limit returned candidates, stop opening records once sufficient, and disclose material unread risk when completeness is not high. Record the projection snapshot so stale indexes are detectable.
 
 ## Scaling path
 
 Adopt infrastructure only when the simpler layer is measurably insufficient:
 
-1. Markdown, `index.md`, anchors, and ordinary file search.
-2. `recall_context.py` for deterministic ranked candidate discovery.
+1. Markdown, bounded root/topic indexes, anchors, and ordinary file search.
+2. `memoryctl.py recall` for deterministic routed candidate discovery.
 3. Project-scoped full-text or embedding search when lexical recall misses paraphrases at meaningful scale.
 4. A temporal context graph when relationship traversal, fact invalidation, and cross-project historical queries justify a database and ingestion pipeline.
 
@@ -82,10 +82,13 @@ Audit behavior rather than file count. Useful signals include:
 - repeated mistakes that lacked a retrieved lesson;
 - unresolved conflicts hidden from `current.md`;
 - context loaded per task versus files actually used;
+- p50/p95 memory tokens and root/topic budget violations;
 - projection snapshot lag;
 - archive records that no active anchor can reach.
 
 If a metric is not collected reliably, treat it as unknown rather than manufacturing a score.
+
+For release evaluation, use the deterministic and paired-live gates in [evaluation.md](evaluation.md). Optimize correctness and token cost together; a smaller context that loses required facts is a regression.
 
 ## Design lineage
 

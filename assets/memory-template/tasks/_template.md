@@ -4,6 +4,7 @@
 TaskRecord(
     id="TASK-YYYYMMDD-NNN",
     anchors=["task:TASK-YYYYMMDD-NNN"],
+    fact_ids=[],
     objective="<bounded objective>",
     status="active | completed | blocked | archived",
     base_snapshot_id="SNAP-YYYYMMDD-HHMMSS",

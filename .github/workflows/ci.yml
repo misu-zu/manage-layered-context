@@ -1,0 +1,67 @@
+name: Evaluation CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evaluation-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-evaluation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: 3.12.10
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install exactly pinned CI dependencies
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --requirement requirements-ci.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q evals scripts tests
+
+      - name: Run runtime unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run evaluator unit tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s evals/tests -t . -p "test_*.py" -v
+
+      - name: Enforce exact skill entrypoint budget
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/memoryctl.py budget . --require-exact --json
+
+      - name: Preflight planned memoryctl v3 interface
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python evals/deterministic_eval.py --repo-root . --preflight
+
+      - name: Run deterministic 100/300/1000 history eval and exact budget checks
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python evals/deterministic_eval.py
+          --repo-root .
+          --history-sizes 100 300 1000
+          --output "${{ runner.temp }}/deterministic-result.json"

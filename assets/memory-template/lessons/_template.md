@@ -9,6 +9,7 @@ Lesson(
         "operation:<operation>",
     ],
     title="<short reusable guidance>",
+    fact_ids=[],
     status="candidate | active | deprecated",
     scope="<where this applies and important exclusions>",
     trigger_signals=[],

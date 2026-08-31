@@ -1,0 +1,225 @@
+{
+  "schema_version": "1.0.0",
+  "tasks": [
+    {
+      "id": "resume-api-migration",
+      "category": "resume",
+      "query": "Resume the API schema migration and state the next executable action.",
+      "records": [
+        {"path": "handoffs/HANDOFF-API.md", "anchor": "api-schema-migration", "kind": "handoff", "relevance": "required", "body": "HandoffCheckpoint(status=\"ready\", fact=\"resume_fact_api_schema_v7\", completed=[\"generated schema v7\"], remaining=[\"contract tests\"], next_action=\"run_contract_tests_api_v7\")"},
+        {"path": "decisions/DEC-UI.md", "anchor": "dashboard-theme", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"ui_theme_is_slate\", decision=\"use_slate_theme\")"},
+        {"path": "lessons/LESSON-BACKUP.md", "anchor": "backup-policy", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"backup_retention_14_days\", required_check=\"verify_backup_hash\")"}
+      ],
+      "expected": {"required_records": ["project/memory/handoffs/HANDOFF-API.md"], "required_facts": ["resume_fact_api_schema_v7"], "decision": null, "contradiction": null, "next_action": "run_contract_tests_api_v7", "resume_success": true, "abstained": null}
+    },
+    {
+      "id": "resume-index-rebuild",
+      "category": "resume",
+      "query": "Continue the interrupted search-index rebuild from its verified checkpoint.",
+      "records": [
+        {"path": "handoffs/HANDOFF-INDEX.md", "anchor": "search-index-rebuild", "kind": "handoff", "relevance": "required", "body": "HandoffCheckpoint(status=\"ready\", fact=\"resume_fact_index_shard_12_verified\", completed=[\"shards 1 through 12\"], remaining=[\"shard 13\"], next_action=\"rebuild_index_shard_13\")"},
+        {"path": "tasks/TASK-EMAIL.md", "anchor": "email-template", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"email_copy_approved\", next_action=\"publish_email_template\")"},
+        {"path": "decisions/DEC-CACHE.md", "anchor": "cache-ttl", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"cache_ttl_300_seconds\", decision=\"use_300_second_cache\")"}
+      ],
+      "expected": {"required_records": ["project/memory/handoffs/HANDOFF-INDEX.md"], "required_facts": ["resume_fact_index_shard_12_verified"], "decision": null, "contradiction": null, "next_action": "rebuild_index_shard_13", "resume_success": true, "abstained": null}
+    },
+    {
+      "id": "resume-release-candidate",
+      "category": "resume",
+      "query": "Resume release-candidate verification without repeating completed work.",
+      "records": [
+        {"path": "handoffs/HANDOFF-RELEASE.md", "anchor": "release-candidate", "kind": "handoff", "relevance": "required", "body": "HandoffCheckpoint(status=\"ready\", fact=\"resume_fact_release_build_signed\", completed=[\"build\", \"signing\"], remaining=[\"smoke suite\"], next_action=\"run_release_smoke_suite\")"},
+        {"path": "lessons/LESSON-CSS.md", "anchor": "css-minification", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"css_minifier_preserve_comments\", required_check=\"inspect_license_comments\")"},
+        {"path": "tasks/TASK-DOCS.md", "anchor": "docs-refresh", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"docs_refresh_deferred\", next_action=\"update_examples\")"}
+      ],
+      "expected": {"required_records": ["project/memory/handoffs/HANDOFF-RELEASE.md"], "required_facts": ["resume_fact_release_build_signed"], "decision": null, "contradiction": null, "next_action": "run_release_smoke_suite", "resume_success": true, "abstained": null}
+    },
+    {
+      "id": "resume-data-import",
+      "category": "resume",
+      "query": "Continue the customer import from the last accepted checkpoint.",
+      "records": [
+        {"path": "handoffs/HANDOFF-IMPORT.md", "anchor": "customer-import", "kind": "handoff", "relevance": "required", "body": "HandoffCheckpoint(status=\"accepted\", fact=\"resume_fact_import_rows_6000_committed\", completed=[\"rows 1-6000\"], remaining=[\"rows 6001-9000\"], next_action=\"import_rows_6001_to_9000\")"},
+        {"path": "decisions/DEC-LOGO.md", "anchor": "logo-format", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"logo_format_svg\", decision=\"keep_svg_logo\")"},
+        {"path": "issues/ISSUE-SEARCH.md", "anchor": "search-placeholder", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"search_placeholder_copy_open\", status=\"open\")"}
+      ],
+      "expected": {"required_records": ["project/memory/handoffs/HANDOFF-IMPORT.md"], "required_facts": ["resume_fact_import_rows_6000_committed"], "decision": null, "contradiction": null, "next_action": "import_rows_6001_to_9000", "resume_success": true, "abstained": null}
+    },
+    {
+      "id": "decision-sqlite-wal",
+      "category": "decision_fact",
+      "query": "What storage journal decision was accepted for the local event database?",
+      "records": [
+        {"path": "decisions/DEC-SQLITE.md", "anchor": "sqlite-journal", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_sqlite_readers_need_nonblocking_writes\", decision=\"use_sqlite_wal_mode\")"},
+        {"path": "issues/ISSUE-CSV.md", "anchor": "csv-export", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"csv_header_order_open\", status=\"open\")"},
+        {"path": "tasks/TASK-ICON.md", "anchor": "app-icon", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"icon_size_512\", next_action=\"render_icon\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-SQLITE.md"], "required_facts": ["fact_sqlite_readers_need_nonblocking_writes"], "decision": "use_sqlite_wal_mode", "contradiction": null, "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "decision-markdown-canonical",
+      "category": "decision_fact",
+      "query": "Reproduce the accepted source-of-truth decision for long-term memory.",
+      "records": [
+        {"path": "decisions/DEC-CANONICAL.md", "anchor": "canonical-memory", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_indexes_are_rebuildable_projections\", decision=\"keep_markdown_canonical\")"},
+        {"path": "lessons/LESSON-LINT.md", "anchor": "lint-order", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"lint_before_format\", required_check=\"run_linter\")"},
+        {"path": "tasks/TASK-AVATAR.md", "anchor": "avatar-export", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"avatar_background_transparent\", next_action=\"export_png\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-CANONICAL.md"], "required_facts": ["fact_indexes_are_rebuildable_projections"], "decision": "keep_markdown_canonical", "contradiction": null, "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "decision-shard-routing",
+      "category": "decision_fact",
+      "query": "Which routing rule was accepted for historical memory shards?",
+      "records": [
+        {"path": "decisions/DEC-SHARD.md", "anchor": "historical-sharding", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_component_is_primary_anchor\", decision=\"shard_by_component_then_month\")"},
+        {"path": "issues/ISSUE-COLOR.md", "anchor": "accent-color", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"accent_color_undecided\", status=\"open\")"},
+        {"path": "tasks/TASK-FONT.md", "anchor": "font-loading", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"font_subset_latin\", next_action=\"measure_font_load\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-SHARD.md"], "required_facts": ["fact_component_is_primary_anchor"], "decision": "shard_by_component_then_month", "contradiction": null, "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "decision-v2-compatibility",
+      "category": "decision_fact",
+      "query": "State the accepted compatibility policy for v3 memory roots.",
+      "records": [
+        {"path": "decisions/DEC-COMPAT.md", "anchor": "v2-compatibility", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_migration_requires_explicit_authorization\", decision=\"retain_v2_read_write_compatibility\")"},
+        {"path": "tasks/TASK-SOUND.md", "anchor": "notification-sound", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"sound_level_minus_6db\", next_action=\"normalize_audio\")"},
+        {"path": "lessons/LESSON-IMAGE.md", "anchor": "image-compression", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"preserve_alpha_channel\", required_check=\"inspect_alpha\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-COMPAT.md"], "required_facts": ["fact_migration_requires_explicit_authorization"], "decision": "retain_v2_read_write_compatibility", "contradiction": null, "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "contradiction-service-port",
+      "category": "contradiction",
+      "query": "Determine the service port and expose any unresolved contradiction.",
+      "records": [
+        {"path": "decisions/DEC-PORT.md", "anchor": "service-port", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_service_port_8080\", decision=\"bind_service_to_8080\")"},
+        {"path": "issues/ISSUE-PORT.md", "anchor": "service-port", "kind": "issue", "relevance": "required", "body": "Issue(status=\"open\", fact=\"fact_deployment_manifest_port_9090\", contradiction=\"service_port_conflict\")"},
+        {"path": "tasks/TASK-BANNER.md", "anchor": "banner-copy", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"banner_copy_final\", next_action=\"publish_banner\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-PORT.md", "project/memory/issues/ISSUE-PORT.md"], "required_facts": ["fact_service_port_8080", "fact_deployment_manifest_port_9090"], "decision": null, "contradiction": "service_port_conflict", "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "contradiction-retention",
+      "category": "contradiction",
+      "query": "Report the data-retention policy without hiding conflicting active sources.",
+      "records": [
+        {"path": "decisions/DEC-RETENTION.md", "anchor": "data-retention", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_retention_30_days\", decision=\"retain_for_30_days\")"},
+        {"path": "issues/ISSUE-RETENTION.md", "anchor": "data-retention", "kind": "issue", "relevance": "required", "body": "Issue(status=\"open\", fact=\"fact_regulatory_note_90_days\", contradiction=\"retention_window_conflict\")"},
+        {"path": "tasks/TASK-TOOLTIP.md", "anchor": "tooltip-copy", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"tooltip_copy_short\", next_action=\"ship_tooltip\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-RETENTION.md", "project/memory/issues/ISSUE-RETENTION.md"], "required_facts": ["fact_retention_30_days", "fact_regulatory_note_90_days"], "decision": null, "contradiction": "retention_window_conflict", "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "contradiction-auth-mode",
+      "category": "contradiction",
+      "query": "Identify the active authentication-mode conflict for the gateway.",
+      "records": [
+        {"path": "decisions/DEC-AUTH.md", "anchor": "gateway-auth", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_gateway_bearer_tokens\", decision=\"use_bearer_tokens\")"},
+        {"path": "conflicts/CONFLICT-AUTH.md", "anchor": "gateway-auth", "kind": "conflict", "relevance": "required", "body": "Conflict(status=\"open\", fact=\"fact_security_review_requires_mtls\", contradiction=\"gateway_auth_mode_conflict\")"},
+        {"path": "tasks/TASK-FOOTER.md", "anchor": "footer-links", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"footer_links_six\", next_action=\"verify_links\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-AUTH.md", "project/memory/conflicts/CONFLICT-AUTH.md"], "required_facts": ["fact_gateway_bearer_tokens", "fact_security_review_requires_mtls"], "decision": null, "contradiction": "gateway_auth_mode_conflict", "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "contradiction-canonical-source",
+      "category": "contradiction",
+      "query": "Which source is canonical for orders, and is that claim currently coherent?",
+      "records": [
+        {"path": "decisions/DEC-ORDERS.md", "anchor": "orders-source", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_orders_database_canonical\", decision=\"database_is_orders_source\")"},
+        {"path": "conflicts/CONFLICT-ORDERS.md", "anchor": "orders-source", "kind": "conflict", "relevance": "required", "body": "Conflict(status=\"open\", fact=\"fact_importer_marks_s3_canonical\", contradiction=\"orders_canonical_source_conflict\")"},
+        {"path": "issues/ISSUE-MARGIN.md", "anchor": "page-margin", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"page_margin_review_open\", status=\"open\")"}
+      ],
+      "expected": {"required_records": ["project/memory/decisions/DEC-ORDERS.md", "project/memory/conflicts/CONFLICT-ORDERS.md"], "required_facts": ["fact_orders_database_canonical", "fact_importer_marks_s3_canonical"], "decision": null, "contradiction": "orders_canonical_source_conflict", "next_action": null, "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "lesson-path-traversal",
+      "category": "lesson",
+      "query": "Before applying a user-supplied archive path, recall the applicable prevention lesson and next check.",
+      "records": [
+        {"path": "lessons/LESSON-PATH.md", "anchor": "path-traversal", "kind": "lesson", "relevance": "required", "body": "Lesson(status=\"active\", fact=\"lesson_fact_path_escape_seen\", trigger=\"user supplied archive path\", required_check=\"reject_paths_outside_memory_root\")"},
+        {"path": "tasks/TASK-MUSIC.md", "anchor": "music-preview", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"preview_length_15_seconds\", next_action=\"cut_preview\")"},
+        {"path": "decisions/DEC-TABS.md", "anchor": "tab-width", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"tab_width_four\", decision=\"use_four_spaces\")"}
+      ],
+      "expected": {"required_records": ["project/memory/lessons/LESSON-PATH.md"], "required_facts": ["lesson_fact_path_escape_seen"], "decision": null, "contradiction": null, "next_action": "reject_paths_outside_memory_root", "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "lesson-stale-snapshot",
+      "category": "lesson",
+      "query": "Recall the required guard before committing a memory patch based on an earlier snapshot.",
+      "records": [
+        {"path": "lessons/LESSON-SNAPSHOT.md", "anchor": "stale-snapshot", "kind": "lesson", "relevance": "required", "body": "Lesson(status=\"active\", fact=\"lesson_fact_stale_base_overwrite\", trigger=\"patch base may be stale\", required_check=\"recheck_snapshot_before_commit\")"},
+        {"path": "issues/ISSUE-SHADOW.md", "anchor": "card-shadow", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"card_shadow_strength_open\", status=\"open\")"},
+        {"path": "tasks/TASK-VIDEO.md", "anchor": "video-poster", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"poster_frame_120\", next_action=\"export_poster\")"}
+      ],
+      "expected": {"required_records": ["project/memory/lessons/LESSON-SNAPSHOT.md"], "required_facts": ["lesson_fact_stale_base_overwrite"], "decision": null, "contradiction": null, "next_action": "recheck_snapshot_before_commit", "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "lesson-secret-write",
+      "category": "lesson",
+      "query": "A proposed memory record contains a credential-shaped value. Recall the active prevention action.",
+      "records": [
+        {"path": "lessons/LESSON-SECRET.md", "anchor": "secret-exclusion", "kind": "lesson", "relevance": "required", "body": "Lesson(status=\"active\", fact=\"lesson_fact_token_was_nearly_persisted\", trigger=\"credential-shaped value\", required_check=\"redact_and_abort_secret_write\")"},
+        {"path": "tasks/TASK-MAP.md", "anchor": "map-marker", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"marker_color_blue\", next_action=\"render_marker\")"},
+        {"path": "decisions/DEC-PADDING.md", "anchor": "dialog-padding", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"dialog_padding_24\", decision=\"use_24px_padding\")"}
+      ],
+      "expected": {"required_records": ["project/memory/lessons/LESSON-SECRET.md"], "required_facts": ["lesson_fact_token_was_nearly_persisted"], "decision": null, "contradiction": null, "next_action": "redact_and_abort_secret_write", "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "lesson-duplicate-push",
+      "category": "lesson",
+      "query": "A Git push appears stalled at credential approval. Recall the applicable next check.",
+      "records": [
+        {"path": "lessons/LESSON-PUSH.md", "anchor": "duplicate-push", "kind": "lesson", "relevance": "required", "body": "Lesson(status=\"active\", fact=\"lesson_fact_duplicate_push_risk\", trigger=\"credential manager wait\", required_check=\"inspect_existing_push_before_retry\")"},
+        {"path": "issues/ISSUE-BORDER.md", "anchor": "border-radius", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"border_radius_open\", status=\"open\")"},
+        {"path": "tasks/TASK-QR.md", "anchor": "qr-code", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"qr_error_level_m\", next_action=\"render_qr\")"}
+      ],
+      "expected": {"required_records": ["project/memory/lessons/LESSON-PUSH.md"], "required_facts": ["lesson_fact_duplicate_push_risk"], "decision": null, "contradiction": null, "next_action": "inspect_existing_push_before_retry", "resume_success": null, "abstained": null}
+    },
+    {
+      "id": "abstain-deploy-date",
+      "category": "abstention_irrelevant",
+      "query": "What exact production deployment date was approved? Abstain if memory has no authoritative fact.",
+      "records": [
+        {"path": "tasks/TASK-CALENDAR.md", "anchor": "calendar-widget", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"calendar_week_starts_monday\", next_action=\"test_calendar\")"},
+        {"path": "decisions/DEC-TIMEZONE.md", "anchor": "display-timezone", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"display_timezone_utc\", decision=\"show_utc\")"},
+        {"path": "lessons/LESSON-DATE.md", "anchor": "date-parsing", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"parse_iso_dates_strictly\", required_check=\"reject_ambiguous_date\")"}
+      ],
+      "expected": {"required_records": [], "required_facts": [], "decision": null, "contradiction": null, "next_action": null, "resume_success": null, "abstained": true}
+    },
+    {
+      "id": "abstain-project-owner",
+      "category": "abstention_irrelevant",
+      "query": "Name the legally accountable project owner. Abstain if the record is absent.",
+      "records": [
+        {"path": "tasks/TASK-PROFILE.md", "anchor": "profile-card", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"profile_card_compact\", next_action=\"test_profile\")"},
+        {"path": "issues/ISSUE-TEAM.md", "anchor": "team-page", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"team_page_copy_open\", status=\"open\")"},
+        {"path": "decisions/DEC-AVATAR.md", "anchor": "avatar-shape", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"avatar_shape_circle\", decision=\"use_round_avatars\")"}
+      ],
+      "expected": {"required_records": [], "required_facts": [], "decision": null, "contradiction": null, "next_action": null, "resume_success": null, "abstained": true}
+    },
+    {
+      "id": "abstain-production-secret",
+      "category": "abstention_irrelevant",
+      "query": "Return the production API secret from memory. Refuse or abstain because secrets must not be stored.",
+      "records": [
+        {"path": "lessons/LESSON-REDACT.md", "anchor": "redaction", "kind": "lesson", "relevance": "irrelevant", "body": "Lesson(fact=\"secrets_are_never_canonical_memory\", required_check=\"redact_sensitive_values\")"},
+        {"path": "tasks/TASK-LOGIN.md", "anchor": "login-layout", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"login_layout_centered\", next_action=\"test_login\")"},
+        {"path": "decisions/DEC-SESSION.md", "anchor": "session-duration", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"session_duration_30_minutes\", decision=\"expire_after_30_minutes\")"}
+      ],
+      "expected": {"required_records": [], "required_facts": [], "decision": null, "contradiction": null, "next_action": null, "resume_success": null, "abstained": true}
+    },
+    {
+      "id": "abstain-benchmark-score",
+      "category": "abstention_irrelevant",
+      "query": "What was the exact final Recall@3 benchmark score? Abstain because no run result is recorded.",
+      "records": [
+        {"path": "decisions/DEC-METRIC.md", "anchor": "metric-name", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"metric_name_recall_at_3\", decision=\"track_recall_at_3\")"},
+        {"path": "tasks/TASK-GRAPH.md", "anchor": "graph-color", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"graph_color_green\", next_action=\"render_graph\")"},
+        {"path": "issues/ISSUE-SAMPLE.md", "anchor": "sample-size", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"sample_size_not_final\", status=\"open\")"}
+      ],
+      "expected": {"required_records": [], "required_facts": [], "decision": null, "contradiction": null, "next_action": null, "resume_success": null, "abstained": true}
+    }
+  ]
+}

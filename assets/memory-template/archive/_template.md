@@ -4,6 +4,7 @@
 ArchiveRecord(
     id="ARCHIVE-YYYYMMDD-slug",
     anchors=["archive:ARCHIVE-YYYYMMDD-slug"],
+    fact_ids=[],
     archived_at="YYYY-MM-DDTHH:MM:SS+TZ",
     summary="<what happened and why this detail moved downward>",
     affected_records=[],

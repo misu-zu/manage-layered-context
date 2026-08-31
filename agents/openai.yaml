@@ -1,4 +1,4 @@
 interface:
   display_name: "Layered Context Memory"
-  short_description: "Retrieve and maintain only task-relevant project memory"
-  default_prompt: "Use $manage-layered-context to initialize and maintain layered project memory for this workspace."
+  short_description: "Bound and retrieve durable project memory progressively"
+  default_prompt: "Use $manage-layered-context to retrieve or maintain bounded project memory for this workspace."

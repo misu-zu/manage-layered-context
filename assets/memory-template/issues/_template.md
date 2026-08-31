@@ -5,6 +5,8 @@ OpenIssue(
     id="ISSUE-NNNN",
     anchors=["issue:ISSUE-NNNN", "concept:<topic>"],
     topic="<topic>",
+    fact_ids=[],
+    contradiction_id=None,
     status="open | blocked | partially_resolved | resolved",
     question="<unresolved question>",
     current_understanding="<known facts and explicit assumptions>",

@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "loaded_files",
+    "recalled_records",
+    "fact_ids",
+    "decision_id",
+    "contradiction_detected",
+    "contradiction_id",
+    "next_action_id",
+    "resume_success",
+    "abstained",
+    "answer"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "description": "Exact evaluation task identifier."},
+    "loaded_files": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Every file actually opened, rooted exactly at skill/ or project/memory/; use skill/SKILL.md without an inserted skill-name directory, and include every recalled_records path."
+    },
+    "recalled_records": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Canonical detail records actually opened, in sequential open order; top 3 is an upper bound and every path must also appear in loaded_files."
+    },
+    "fact_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Exact first-class fact identifiers only; never prose."
+    },
+    "decision_id": {"type": ["string", "null"], "description": "Exact Decision.choice identifier only; never a fact identifier or prose."},
+    "contradiction_detected": {"type": "boolean", "description": "True exactly when loaded authoritative records expose an unresolved contradiction."},
+    "contradiction_id": {"type": ["string", "null"], "description": "Exact first-class contradiction identifier only; never explanatory prose."},
+    "next_action_id": {"type": ["string", "null"], "description": "Exact next-action or required-check identifier only."},
+    "resume_success": {"type": "boolean", "description": "Whether the requested continuation state and next action were recovered."},
+    "abstained": {"type": "boolean", "description": "True when authoritative memory does not contain the requested answer."},
+    "answer": {"type": "string", "description": "Human-readable answer; identifiers remain in their typed fields."}
+  }
+}

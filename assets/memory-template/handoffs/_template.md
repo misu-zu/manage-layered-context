@@ -2,9 +2,11 @@
 
 ```python
 HandoffCheckpoint(
+    profile="full",
     checkpoint_id="HANDOFF-YYYYMMDD-HHMMSS-slug",
     context_id="context:<workstream>",
     task_id="TASK-YYYYMMDD-NNN",
+    fact_ids=[],
     status="draft | ready | blocked | accepted | consumed | rejected | superseded",
     created_at="YYYY-MM-DDTHH:MM:SS+TZ",
     from_actor="<sender role or agent>",
@@ -36,4 +38,4 @@ HandoffCheckpoint(
 )
 ```
 
-Use `ready` only when the checkpoint is committed, internally consistent, and independently verifiable.
+Use `full` for another agent, a branch, high risk, or complex artifacts. Use `ready` only when committed, internally consistent, and independently verifiable.

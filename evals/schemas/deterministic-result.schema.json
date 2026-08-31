@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misu-zu/manage-layered-context/evals/schemas/deterministic-result.schema.json",
+  "title": "manage-layered-context deterministic evaluation result",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "kind", "status", "failures"],
+  "properties": {
+    "schema_version": {"const": "1.1.0"},
+    "kind": {
+      "enum": ["deterministic_synthetic_eval", "deterministic_synthetic_eval_preflight"]
+    },
+    "status": {"enum": ["passed", "failed", "preflight_failed"]},
+    "failures": {"type": "array"}
+  }
+}

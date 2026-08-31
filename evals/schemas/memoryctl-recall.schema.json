@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misu-zu/manage-layered-context/evals/schemas/memoryctl-recall.schema.json",
+  "title": "memoryctl recall --json output",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["query", "top", "candidates", "retrieval_policy"],
+  "properties": {
+    "query": {"type": "string"},
+    "top": {"type": "integer", "const": 3},
+    "retrieval_policy": {
+      "type": "object",
+      "required": ["mode", "candidate_limit", "open_one_at_a_time", "stop_when_sufficient"],
+      "properties": {
+        "mode": {"const": "sequential"},
+        "candidate_limit": {"type": "integer", "const": 3},
+        "open_one_at_a_time": {"const": true},
+        "stop_when_sufficient": {"const": true}
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {"path": {"type": "string"}}
+      }
+    }
+  }
+}

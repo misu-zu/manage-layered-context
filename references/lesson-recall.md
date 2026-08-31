@@ -60,12 +60,12 @@ Run lesson preflight for mutating, repeated, risky, or previously failed work.
 4. Use lexical ranking next. When available, run:
 
    ```text
-   python <skill-root>/scripts/recall_context.py <memory-root> --query "<task fingerprint>" --kinds lessons,archive --top 8
+   python <skill-root>/scripts/memoryctl.py recall <memory-root> --query "<task fingerprint>" --kinds lessons,archive --top 3
    ```
 
-   The helper returns candidate paths and matching signals; it does not load or validate their claims.
+   The helper returns a ranked candidate upper bound and matching signals; it does not load or validate their claims. Open rank 1 and assess applicability before opening the next candidate. Expand with `--expand` (configured limit 8) only when the first three, checked sequentially, do not provide adequate coverage.
 5. Use optional semantic or hybrid search only as a candidate generator. Namespace it by project and retain source paths and score explanations.
-6. Read the highest-value candidates. Judge applicability using scope, status, trigger match, temporal validity, evidence quality, and contradictions.
+6. Read the highest-value candidate, judge applicability using scope, status, trigger match, temporal validity, evidence quality, and contradictions, then stop or continue one at a time.
 7. Produce `LessonRecallReport`. Add only applicable active-lesson checks to the task plan and eventual handoff.
 
 Reject a candidate explicitly when it is outside scope, deprecated, weakly supported, contradicted, stale, or merely similar in wording. Severity determines the cost of ignoring an applicable lesson; it does not make an irrelevant lesson more relevant.

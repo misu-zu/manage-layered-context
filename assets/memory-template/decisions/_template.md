@@ -5,6 +5,7 @@ Decision(
     id="ADR-NNNN",
     anchors=["decision:ADR-NNNN", "concept:<topic>"],
     topic="<topic>",
+    fact_ids=[],
     choice="<explicit choice>",
     status="tentative | active | deprecated",
     confidence="low | medium | high",

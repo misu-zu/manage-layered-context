@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misu-zu/manage-layered-context/evals/schemas/memoryctl-validate.schema.json",
+  "title": "memoryctl validate --json output",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["ok", "errors", "warnings"],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "errors": {"type": "array"},
+    "warnings": {"type": "array"}
+  }
+}

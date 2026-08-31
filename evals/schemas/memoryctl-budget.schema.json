@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misu-zu/manage-layered-context/evals/schemas/memoryctl-budget.schema.json",
+  "title": "memoryctl budget --require-exact --json output",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "ok", "items"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "ok": {"type": "boolean"},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "tokens", "target", "hard", "exact", "method", "over_hard"],
+        "properties": {
+          "path": {"type": "string"},
+          "tokens": {"type": "integer", "minimum": 0},
+          "target": {"type": "integer", "minimum": 0},
+          "hard": {"type": "integer", "minimum": 0},
+          "exact": {"const": true},
+          "method": {"type": "string"},
+          "over_hard": {"const": false}
+        }
+      }
+    }
+  }
+}

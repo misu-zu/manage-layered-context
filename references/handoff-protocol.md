@@ -1,63 +1,71 @@
 # Handoff Checkpoint Protocol
 
-Read this file when work must continue in another agent, branch, session, or context window. A handoff checkpoint is a durable continuation contract bound to a committed memory snapshot. It is not a transcript summary and does not itself authorize new work.
+Read this reference when another agent, branch, session, or context window must continue. A checkpoint is a durable continuation contract bound to committed memory, not a transcript summary and not new authorization.
 
-## When to create one
+## Choose a profile
 
-Create a checkpoint when at least one condition applies:
+Use the safest automatic default:
 
-- control is intentionally transferring to another agent or branch;
-- material work remains when the current run pauses or blocks;
-- context compression would otherwise discard operational state;
-- a long or risky operation reaches a verified restart boundary;
-- branch results need acceptance before merge.
+- `lite`: the same agent resumes in a later session, the state is simple, risk is ordinary, and no complex artifact acceptance is needed.
+- `full`: a different agent, branch transfer, high-risk operation, complex artifacts, disputed assumptions, or explicit request.
 
-Do not create one for a trivial completed task with no continuation value. Do not checkpoint in the middle of an irreversible side effect when no safe restart boundary exists; first reach a stable state or record the checkpoint as `blocked` with the exact recovery constraint.
+An explicit profile overrides the automatic choice. A v2 checkpoint with no `profile` is `full`.
 
-## Sender protocol
+Lite contains exactly the operational resume set:
 
-1. Read `current.md`, `index.md`, the active task, relevant lessons, and any predecessor checkpoint.
-2. Re-read observable workspace state. Separate completed and verified work from attempted or assumed work.
-3. Run the task's required checks, or state precisely which check could not run and why.
-4. Create a `HandoffCheckpoint` through a context patch. Use the patch base as `source_snapshot_id`, its target as both `created_snapshot_id` and `last_updated_snapshot_id`, and preserve the task's original base as `task_base_snapshot_id`.
-5. Set one next executable action. Supporting steps may remain in `remaining`, but `next_action` must be concrete enough to start without reconstructing the conversation.
-6. Add the checkpoint to `index.md`, the task's `handoff_refs`, and `current.md.latest_handoff` when it is the active continuation point.
-7. Commit the patch transaction before transferring control. A draft in conversation is not a durable checkpoint.
+```python
+HandoffCheckpoint(
+    profile="lite",
+    checkpoint_id="HANDOFF-20260830-013000-parser",
+    task_id="TASK-20260830-001",
+    status="ready",
+    objective="Finish parser regression verification.",
+    state_summary="Recovery branch is implemented; full suite remains.",
+    completed=["Targeted parser tests passed."],
+    remaining=["Run the full parser suite."],
+    next_action="Run the full parser suite from the project root.",
+    changed_files=["src/parser.py", "tests/test_parser.py"],
+    verification=["targeted parser tests: 12 passed"],
+    blockers=[],
+    source_snapshot_id="SNAP-20260830-012800",
+    checkpoint_snapshot_id="SNAP-20260830-012900",
+)
+```
 
-Use `status="ready"` only when the checkpoint is internally consistent and the receiver can validate it. Use `status="blocked"` when continuation depends on an unresolved blocker. Keep incomplete authoring as `draft` and do not present it as handed off.
+Full adds context ID, actor/receiver, creation time, task-base/source/created/last-updated snapshots, predecessor, acceptance criteria, artifacts/deletions, assumptions, risks, anchors, lessons/checks, pending patches, sources, and consumption provenance. Inspect the exact conditional schema with `memoryctl.py schema HandoffCheckpoint --json` and use `assets/memory-template/handoffs/_full_template.md`.
 
-## Readiness checklist
+## When to create
 
-A ready or blocked checkpoint must make all of these explicit:
+Create at a stable restart boundary when control transfers, material unfinished work pauses or blocks, compression would discard operational detail, or risky work reaches a verified checkpoint. Skip trivial completed work with no continuation value. Never checkpoint mid-side-effect when no safe restart exists; first stabilize or set `blocked` with the exact recovery constraint.
 
-- stable `checkpoint_id`, `context_id`, and `task_id`;
-- task base, sender-inspected source, checkpoint creation, and last-updated snapshot IDs;
-- objective and acceptance criteria;
-- concise current state;
-- verified completed work and genuinely remaining work;
-- next executable action, or `None` only when blocked or complete;
-- artifact and changed-file paths that exist at the checkpoint, plus intentionally removed paths in `deleted_files`;
-- verification commands or checks and their observed outcomes;
-- assumptions, risks, and blockers;
-- relevant anchors, applied lessons, and required checks;
-- pending context patches or external state not represented by committed files;
-- durable source references.
+## Sender
 
-Do not include credentials, hidden reasoning, an unfiltered transcript dump, or claims that exist only in the sender's conversational context.
+1. Read current/index, active task, relevant lessons, and predecessor.
+2. Reinspect observable workspace state; separate verified completion from attempts and assumptions.
+3. Run required checks or state exactly why one could not run.
+4. Create the selected profile through the normal transaction. `source_snapshot_id` is the state inspected by the sender; the checkpoint snapshot is the committed target.
+5. Set one executable `next_action`. Supporting work stays in `remaining`.
+6. Add the checkpoint to an index and the active task; update `latest_handoff` when it is the active continuation.
+7. Commit before transfer. Conversation-only drafts are not handoffs.
 
-## Receiver protocol
+Use `ready` only when internally consistent and independently verifiable. Use `blocked` for an unresolved dependency and `draft` while authoring. Full ready/accepted checkpoints must validate artifacts and changed files fail-closed. Lite ready/accepted checkpoints validate `changed_files`.
 
-1. Read the checkpoint first, then `current.md` and `index.md`. Read `project.md`, the task, lessons, and source records needed to validate it.
-2. Compare `last_updated_snapshot_id` with the current commit boundary. Preserve `created_snapshot_id` as immutable provenance.
-   - Equal: continue validation.
-   - Current is newer: treat the checkpoint as stale, re-evaluate affected anchors, and record disposition `rebased` if it remains usable.
-   - Current is older, mixed, or ambiguous: stop acceptance and create or update a conflict or recovery record.
-3. Validate that referenced artifacts and changed files exist in the stated condition. Re-run critical checks when the evidence is missing, stale, environment-dependent, or high risk.
-4. Confirm lesson applicability independently. A lesson reference is not proof that its guard still fits.
-5. Set `accepted` through a patch before relying on the checkpoint for a long continuation. Set `consumed` only after its continuation state has been incorporated into the current task or a successor checkpoint.
-6. If rejecting it, record the concrete mismatch and next action. Preserve the checkpoint as evidence; do not rewrite it into apparent agreement.
+Never include credentials, hidden reasoning, an unfiltered transcript, or claims supported only by the sender’s chat context.
 
-## State transitions
+## Receiver
+
+1. Read checkpoint, current, and root index; then the minimum task, topic shard, lesson, and source records needed.
+2. Compare the checkpoint snapshot with the current boundary:
+   - equal → validate normally;
+   - current newer → checkpoint is stale evidence; re-evaluate anchors and record `rebased` if still usable;
+   - current older, mixed, or ambiguous → stop acceptance and enter conflict/recovery.
+3. Validate changed files/artifacts and rerun critical checks when evidence is missing, stale, environment-dependent, or high risk.
+4. Reassess lesson applicability independently.
+5. Record accepted/rebased/rejected/consumed through an authorized transaction. Preserve rejected and superseded checkpoints as evidence.
+
+For Lite, acceptance or consumption may piggyback on the next already-authorized memory update. Do not create a standalone write solely to mark consumption when no write is otherwise authorized.
+
+## States
 
 ```text
 draft -> ready -> accepted -> consumed -> archived
@@ -67,57 +75,19 @@ draft -> ready -> accepted -> consumed -> archived
    +-> blocked -> ready | superseded
 ```
 
-Only a committed patch changes checkpoint status. Preserve predecessors so a continuation chain can be audited without relying on chat history.
+Only a committed transaction changes status. A stale checkpoint remains provenance, not current state.
 
-## Relationship to other records
+## Snapshot meanings
 
-- `TaskRecord` owns the bounded objective and accumulated outcomes.
-- `HandoffCheckpoint` owns one resumable continuation boundary.
-- `ContextPatch` proposes and transactionally commits memory changes.
-- `ArchiveEntry` preserves consumed historical checkpoints and any mistake digests.
+Lite uses `source_snapshot_id` and `checkpoint_snapshot_id`. Full preserves four distinct roles so creation does not make itself stale:
 
-A branch result normally proposes a patch. Add a checkpoint when another actor must continue or accept that result. Neither record makes branch conclusions authoritative until current memory validates and merges them.
-
-## Compact example
-
-```python
-HandoffCheckpoint(
-    checkpoint_id="HANDOFF-20260826-153000-parser-repair",
-    context_id="context:parser-repair",
-    task_id="TASK-20260826-001",
-    status="ready",
-    created_at="2026-08-26T15:30:00+09:00",
-    from_actor="implementation-agent",
-    intended_receiver="review-agent",
-    task_base_snapshot_id="SNAP-20260826-140000",
-    source_snapshot_id="SNAP-20260826-152800",
-    created_snapshot_id="SNAP-20260826-152900",
-    last_updated_snapshot_id="SNAP-20260826-152900",
-    predecessor_checkpoint_id=None,
-    objective="Repair parser recovery without changing accepted syntax.",
-    acceptance_criteria=["targeted tests pass", "legacy fixture remains unchanged"],
-    state_summary="Recovery branch implemented; broader regression suite remains.",
-    completed=["Added recovery branch", "Ran targeted fixture tests: pass"],
-    remaining=["Run full parser suite", "Review error-location behavior"],
-    next_action="Run the full parser suite from the project root.",
-    artifacts=[],
-    changed_files=["src/parser.py", "tests/test_recovery.py"],
-    deleted_files=[],
-    verification=["targeted recovery tests: 12 passed"],
-    assumptions=["accepted syntax is frozen by ADR-0012"],
-    risks=["error offsets may differ for nested input"],
-    blockers=[],
-    relevant_anchors=["component:parser", "decision:ADR-0012"],
-    lesson_refs=["lesson:LESSON-0004"],
-    required_checks=["compare legacy fixture bytes"],
-    pending_patches=[],
-    source_refs=[SourceRef(ref_type="file", ref_id="tests/test_recovery.py")],
-    consumed_by=None,
-)
-```
+- `task_base_snapshot_id`: where the task began;
+- `source_snapshot_id`: committed state inspected before authoring;
+- `created_snapshot_id`: immutable checkpoint creation commit;
+- `last_updated_snapshot_id`: latest commit that changed checkpoint content/status.
 
 ## Design lineage
 
-- [LangGraph checkpoint protocol](https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint/README.md): thread-scoped state, checkpoint IDs, pending writes, and resumability.
+- [LangGraph checkpoint protocol](https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint/README.md): scoped checkpoints, pending writes, and resumability.
 - [OpenAI Agents SDK handoffs](https://github.com/openai/openai-agents-python/blob/main/docs/handoffs.md): typed handoff metadata and deliberate history filtering.
-- [A2A task model](https://github.com/a2aproject/A2A/blob/main/specification/a2a.proto): context IDs, task lifecycle state, artifacts, and history.
+- [A2A task model](https://github.com/a2aproject/A2A/blob/main/specification/a2a.proto): task lifecycle, context IDs, and artifacts.

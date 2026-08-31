@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misu-zu/manage-layered-context/evals/schemas/live-result.schema.json",
+  "title": "manage-layered-context paired live evaluation result",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "kind", "status", "preflight", "failures"],
+  "properties": {
+    "schema_version": {"const": "1.1.0"},
+    "kind": {"enum": ["paired_live_eval", "paired_live_eval_preflight"]},
+    "status": {"enum": ["passed", "failed", "preflight_failed", "dry_run"]},
+    "preflight": {"type": "object"},
+    "failures": {"type": "array"}
+  }
+}

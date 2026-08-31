@@ -27,4 +27,4 @@ ProjectState(
 )
 ```
 
-Keep this dashboard small. Link records by anchor; do not duplicate their full detail here.
+Keep this dashboard below 450 target / 600 hard o200k tokens. Link records by anchor; do not duplicate rationale or evidence here.
