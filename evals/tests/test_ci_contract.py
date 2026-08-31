@@ -38,6 +38,20 @@ class CiContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, text)
 
+    def test_checkout_fetches_pinned_v2_history(self) -> None:
+        document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        jobs = document["jobs"]
+        checkout_steps = [
+            step
+            for job in jobs.values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        ]
+        self.assertTrue(checkout_steps)
+        for step in checkout_steps:
+            with self.subTest(step=step.get("name", "checkout")):
+                self.assertEqual(0, step.get("with", {}).get("fetch-depth"))
+
     def test_ci_dependencies_are_exactly_pinned(self) -> None:
         requirements = [
             line.strip()
