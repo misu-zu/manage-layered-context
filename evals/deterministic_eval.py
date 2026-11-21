@@ -27,8 +27,6 @@ from evals.contracts import (  # noqa: E402
 
 
 DEFAULT_HISTORY_SIZES = (100, 300, 1000)
-ROUTE_COUNT = 20
-SHARD_SIZE = 24
 CURRENT_HARD_LIMIT = 600
 ROOT_INDEX_HARD_LIMIT = 2000
 TOPIC_INDEX_HARD_LIMIT = 2000
@@ -58,6 +56,8 @@ def _probe_numbers(task_count: int, query_count: int) -> list[int]:
         raise ValueError("task_count must be positive")
     if query_count <= 0:
         raise ValueError("query_count must be positive")
+    if query_count == 1:
+        return [1]
     if query_count >= task_count:
         return list(range(1, task_count + 1))
     points = {
@@ -72,30 +72,30 @@ def _probe_numbers(task_count: int, query_count: int) -> list[int]:
 
 
 def generate_fixture(root: Path, task_count: int, query_count: int = DEFAULT_QUERIES_PER_SIZE) -> SyntheticFixture:
-    snapshot_id = f"SNAP-EVAL-{task_count:06d}"
-    memory = root
+    base = "SNAP-20260101-000000"
+    snapshot_id = "SNAP-20260101-000100"
     details: list[str] = []
-    shard_routes: list[str] = []
-
-    config = {
-        "schema_version": 3,
-        "record_mode": "standard",
-        "budgets": {
-            "current": {"target": 450, "hard": CURRENT_HARD_LIMIT},
-            "root_index": {"target": 1500, "hard": ROOT_INDEX_HARD_LIMIT},
-            "topic_index": {"target": 1500, "hard": TOPIC_INDEX_HARD_LIMIT},
-        },
-        "tokenizer": {
-            "encoding": TOKENIZER_NAME,
-            "fallback": "max_utf8_bytes_or_chars_div_3",
-        },
-        "retrieval": {"normal_top_k": 3, "expanded_top_k": 8},
-    }
-    _write_text(memory / "config.json", json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True))
+    entries: list[str] = []
+    probes: list[tuple[str, str]] = []
+    root = root.resolve()
+    memory = root
+    numbers = _probe_numbers(task_count, query_count)
+    # Each clue is shared by many records. The place, service and incident distinguish a task.
+    services = ("gateway", "ledger", "catalog", "queue", "billing", "search", "worker", "storage",
+                "monitor", "ingress", "export", "mirror", "router", "vault", "cache", "parser",
+                "audit", "registry", "scheduler", "journal")
+    changes = ("certificate rotation", "quota rollback", "timeout tuning", "queue draining",
+               "checksum verification", "lease renewal", "replica recovery", "schema upgrade",
+               "鍵の交換", "転送の再開")
+    questions = ("How was the certificate replaced", "Why was the new quota reverted",
+                 "Why change the timeout", "How was draining handled", "Which checksum was checked",
+                 "When did the lease expire", "How did the replica come back", "Why revise the schema",
+                 "暗号鍵をいつ交換しましたか", "いつ転送を再開しましたか")
+    regions = ("Tokyo", "Berlin", "Lisbon", "Boston", "Seoul")
     _write_text(
         memory / "current.md",
         _structured(f'''ProjectState(
-    snapshot_id="{snapshot_id}",
+    snapshot_id="{base}",
     project_identity="synthetic-eval",
     record_mode="standard",
     active_goal="Evaluate bounded retrieval over {task_count} archived tasks",
@@ -137,13 +137,18 @@ def generate_fixture(root: Path, task_count: int, query_count: int = DEFAULT_QUE
     (memory / "lessons").mkdir(parents=True, exist_ok=True)
     (memory / "handoffs").mkdir(parents=True, exist_ok=True)
 
-    tasks_by_component: dict[int, list[int]] = {index: [] for index in range(ROUTE_COUNT)}
     for number in range(1, task_count + 1):
-        tasks_by_component[(number - 1) % ROUTE_COUNT].append(number)
+        service = services[(number - 1) % len(services)]
+        incident = ((number - 1) // len(services)) % len(changes)
+        change = changes[incident]
+        region = regions[((number - 1) // (len(services) * len(changes))) % len(regions)]
+        cycle = (number - 1) // (len(services) * len(changes) * len(regions))
+        if cycle:
+            region = f"{region} cohort-{cycle + 1}"
         task_id = f"TASK-{number:06d}"
-        task_anchor = f"task-{number:06d}"
-        component = f"component-{(number - 1) % ROUTE_COUNT:02d}"
-        component_anchor = f"component:{component}"
+        task_anchor = f"task:{task_id}"
+        namespace = "component" if number % 2 else "concept"
+        component_anchor = f"{namespace}:{service}"
         detail_path = f"tasks/{task_id}.md"
         fact = f"fact-{number:06d}-owner-team-{number % 17:02d}"
         decision = f"decision-{number:06d}-mode-{number % 11:02d}"
@@ -154,10 +159,10 @@ def generate_fixture(root: Path, task_count: int, query_count: int = DEFAULT_QUE
     id="{task_id}",
     anchors=["{component_anchor}", "{task_anchor}"],
     fact_ids=["{fact}", "{decision}"],
-    objective="Recall {fact} and {decision}",
+    objective="{region} {service} maintenance: {change}.",
     status="archived",
-    base_snapshot_id="{snapshot_id}",
-    last_updated_snapshot_id="{snapshot_id}",
+    base_snapshot_id="{base}",
+    last_updated_snapshot_id="{base}",
     created_at="2026-01-01T00:00:00Z",
     updated_at="2026-01-01T00:00:00Z",
     relevant_anchors=["{component_anchor}", "{task_anchor}"],
@@ -171,89 +176,22 @@ def generate_fixture(root: Path, task_count: int, query_count: int = DEFAULT_QUE
         )
         details.append(detail_path)
 
-    for component_number, task_numbers in tasks_by_component.items():
-        if not task_numbers:
-            continue
-        component = f"component-{component_number:02d}"
-        component_anchor = f"component:{component}"
-        for chunk_index, offset in enumerate(range(0, len(task_numbers), SHARD_SIZE), start=1):
-            chunk = task_numbers[offset : offset + SHARD_SIZE]
-            shard_id = f"{component}-{chunk_index:03d}"
-            shard_path = f"indexes/{shard_id}.md"
-            entries: list[str] = []
-            anchors: list[str] = [f'"{component_anchor}"']
-            for number in chunk:
-                task_id = f"TASK-{number:06d}"
-                task_anchor = f"task-{number:06d}"
-                detail_path = f"tasks/{task_id}.md"
-                fact = f"fact-{number:06d}-owner-team-{number % 17:02d}"
-                decision = f"decision-{number:06d}-mode-{number % 11:02d}"
-                anchors.append(f'"{task_anchor}"')
-                entries.append(
-                    "        IndexEntry("
-                    f'anchors=["{component_anchor}", "{task_anchor}"], '
-                    f'summary="{fact} {decision}", path="{detail_path}", '
-                    'importance="L4_historical_detail", status="archived", related=[], '
-                    f'record_snapshot_id="{snapshot_id}"),'
-                )
-            _write_text(
-                root / shard_path,
-                _structured(
-                    "\n".join(
-                        [
-                            "TopicIndex(",
-                            f'    topic_id="{shard_id}",',
-                            f'    snapshot_id="{snapshot_id}",',
-                            f"    anchors=[{', '.join(anchors)}],",
-                            "    entries=[",
-                            *entries,
-                            "    ],",
-                            "    archive_route=None,",
-                            ")",
-                        ]
-                    )
-                ),
-            )
-        shard_routes.append(
-            "    IndexRoute("
-            f'route_id="{component}", anchor_prefixes=["{component_anchor}"], '
-            f'path_glob="indexes/{component}-*.md", summary="{component} history", '
-            'status_scope=["archived"]),'
+        entries.append(
+            f'IndexEntry(anchors=["{component_anchor}"], summary="{region} {service} {change}", '
+            f'path="{detail_path}", importance="L4_historical_detail", status="archived", '
+            f'related=[], record_snapshot_id="{base}"),'
         )
+        if number in numbers:
+            # Vary word order and omit status, paths, IDs and anchor syntax.
+            probes.append((f"{questions[incident]} for {region} {service}?", detail_path))
 
-    _write_text(
-        memory / "index.md",
-        _structured(
-            "\n".join(
-                [
-                    "ActiveMemoryIndex(",
-                    f'    snapshot_id="{snapshot_id}",',
-                    "    entries=[],",
-                    "    routes=[",
-                    *shard_routes,
-                    "    ],",
-                    ")",
-                ]
-            )
-        ),
-    )
-    _write_text(
-        memory / "archive" / "manifest.md",
-        _structured('''ArchiveManifest(
-    entries=[],
-)'''),
-    )
-
-    probes: list[tuple[str, str]] = []
-    for number in _probe_numbers(task_count, query_count):
-        component = f"component-{(number - 1) % ROUTE_COUNT:02d}"
-        query = (
-            f"component:{component} task-{number:06d} fact-{number:06d}-owner-team-{number % 17:02d} "
-            f"decision-{number:06d}-mode-{number % 11:02d}"
-        )
-        expected = f"tasks/TASK-{number:06d}.md"
-        probes.append((query, expected))
-
+    _write_text(memory / "index.md", _structured(
+        f'MemoryIndex(snapshot_id="{base}", entries=[\n' + "\n".join(entries) + "\n])"
+    ))
+    _write_text(memory / "archive/manifest.md", _structured("ArchiveManifest(entries=[])"))
+    cli = Path(__file__).resolve().parents[1] / "scripts/memoryctl.py"
+    _run_memoryctl(sys.executable, cli, ["migrate", str(root), "--target-snapshot", snapshot_id,
+                   "--apply", "--confirm", "APPLY_V3_MIGRATION", "--json"], cwd=cli.parent)
     return SyntheticFixture(
         root=root,
         task_count=task_count,
@@ -520,6 +458,18 @@ def run_evaluation(
                 _validate_budget_output(budget_output)
                 budget_ok = True
 
+                absent = _run_memoryctl(python_executable, memoryctl, [
+                    "recall", str(fixture.root), "--query", "who is the legal proprietor", "--top", "3", "--json",
+                ], cwd=repo_root)
+                if _recall_paths(absent):
+                    failures.append({"code": "false_positive", "message": "unanswerable query returned candidates"})
+                if task_count >= 2:
+                    across = _run_memoryctl(python_executable, memoryctl, [
+                        "recall", str(fixture.root), "--query", "Tokyo gateway ledger certificate replacement",
+                        "--top", "3", "--json",
+                    ], cwd=repo_root)
+                    if not set(fixture.detail_paths[:2]).issubset(_recall_paths(across)):
+                        failures.append({"code": "cross_route_miss", "message": "missing a record from a second route"})
                 for query, expected_path in fixture.query_cases:
                     recall_output = _run_memoryctl(
                         python_executable,
@@ -594,8 +544,7 @@ def run_evaluation(
         "config": {
             "history_sizes": list(history_sizes),
             "queries_per_size": query_count,
-            "route_count": ROUTE_COUNT,
-            "shard_size": SHARD_SIZE,
+            "fixture_creation": "flat v2 index migrated by forensic transaction",
             "tokenizer": TOKENIZER_NAME,
             "exact_budget_required": True,
             "network_allowed": False,

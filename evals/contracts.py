@@ -12,6 +12,7 @@ PINNED_V2_SHA = "3ea56f1dcb98f098a7354b45ee4a0457fe1fae8d"
 MAX_CONCURRENCY = 16
 
 ABSOLUTE_GATES = {
+    "unstable_boundary_detected": 1.0,
     "resume_success": 0.95,
     "required_record_recall_at_3": 0.95,
     "required_fact_extraction": 0.95,
@@ -99,7 +100,7 @@ def require_exact_tokenizer() -> Any:
 
 
 def count_tokens(encoding: Any, text: str) -> int:
-    return len(encoding.encode(text))
+    return len(encoding.encode_ordinary(text))
 
 
 def normalize_relative_path(value: str, *, allowed_prefixes: Sequence[str]) -> str:

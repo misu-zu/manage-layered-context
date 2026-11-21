@@ -10,7 +10,7 @@ ActiveMemoryIndex(
         IndexRoute(
             route_id="route:general",
             anchor_prefixes=["component:", "concept:", "operation:", "risk:"],
-            path_glob="indexes/general.md",
+            path_glob="indexes/general*.md",
             summary="General bounded topic route; split semantically as history grows.",
             status_scope=["active", "archived", "deprecated", "scratch"],
         ),

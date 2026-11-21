@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from evals.read_trace import observed_files
 from evals.contracts import ContractError, require_exact_tokenizer
 from evals.live_eval import (
     WORKTREE_REF,
@@ -36,6 +37,7 @@ FIXTURES = REPO_ROOT / "evals" / "fixtures"
 def _arm_metrics(*, rate: float, p50: int, p95: int, irrelevant: float) -> dict:
     metric_names = (
         "resume_success",
+        "unstable_boundary_detected",
         "required_record_recall_at_3",
         "required_fact_extraction",
         "decision_id_exact",
@@ -49,8 +51,10 @@ def _arm_metrics(*, rate: float, p50: int, p95: int, irrelevant: float) -> dict:
         name: {"passed": int(rate * 100), "total": 100, "rate": rate}
         for name in metric_names
     }
+    metrics["unstable_boundary_detected"] = {"passed": 5, "total": 5, "rate": 1.0}
+    metrics["input_tokens"] = {"p50": p50}
     metrics["memory_overhead_tokens"] = {"count": 100, "p50": p50, "p95": p95}
-    metrics["irrelevant_record_load"] = {"count": 100, "total": irrelevant * 100, "mean_per_run": irrelevant}
+    metrics["irrelevant_record_load"] = {"count": 100, "total": irrelevant * 100, "mean_per_run": irrelevant, "max_per_run": irrelevant}
     return {
         "run_count": 100,
         "scored_count": 100,
@@ -116,7 +120,7 @@ class LiveTaskContractTests(unittest.TestCase):
 
     def test_success_fixture_captures_usage_and_scores_exact_fact(self) -> None:
         events = (FIXTURES / "codex-success.jsonl").read_text(encoding="utf-8")
-        raw_output, usage = parse_codex_events(events)
+        raw_output, usage, commands = parse_codex_events(events)
         self.assertEqual(3210, usage["input_tokens"])
         output = validate_agent_output(raw_output, "decision-sqlite-wal")
         task = next(task for task in load_tasks(TASKS_PATH) if task["id"] == "decision-sqlite-wal")
@@ -126,21 +130,19 @@ class LiveTaskContractTests(unittest.TestCase):
             skill.parent.mkdir(parents=True)
             skill.write_text("local evaluation skill\n", encoding="utf-8")
             build_project_fixture(workspace / "project", task, "v2")
-            score = score_output(task, output, workspace, require_exact_tokenizer())
+            score = score_output(task, output, workspace, require_exact_tokenizer(), observed_files(commands, workspace))
         self.assertTrue(score["scores"]["required_record_recall_at_3"])
         self.assertTrue(score["scores"]["required_fact_extraction"])
         self.assertTrue(score["scores"]["decision_id_exact"])
         self.assertEqual(0, score["irrelevant_record_load"])
         self.assertGreater(score["memory_overhead_tokens"], 0)
 
-    def test_prompt_defines_sequential_candidates_and_typed_ids(self) -> None:
-        prompt = build_prompt(load_tasks(TASKS_PATH)[0])
-        self.assertIn("skill root is exactly `skill/`", prompt)
-        self.assertIn("never insert `manage-layered-context/`", prompt)
-        self.assertIn("candidate upper bound", prompt)
-        self.assertIn("open rank 1", prompt)
-        self.assertIn("recalled_records ⊆ loaded_files", prompt)
-        self.assertIn("must also appear verbatim in loaded_files", prompt)
+    def test_prompt_defines_output_without_teaching_retrieval(self) -> None:
+        task = load_tasks(TASKS_PATH)[0]
+        prompt = build_prompt(task)
+        self.assertIn("skill/SKILL.md", prompt)
+        self.assertNotIn("skill/SKILL.md", build_prompt(task, no_skill=True))
+        self.assertNotIn("open rank 1", prompt)
         self.assertIn("decision_id", prompt)
         self.assertIn("contradiction_id", prompt)
         self.assertIn("abstained=true", prompt)
@@ -165,6 +167,7 @@ class LiveTaskContractTests(unittest.TestCase):
             "next_action_id": None,
             "resume_success": False,
             "abstained": False,
+            "unstable_boundary": False,
             "answer": "The sources conflict.",
         }
         with tempfile.TemporaryDirectory(prefix="mlc-live-split-score-") as temporary:
@@ -173,7 +176,7 @@ class LiveTaskContractTests(unittest.TestCase):
             skill.parent.mkdir(parents=True)
             skill.write_text("local evaluation skill\n", encoding="utf-8")
             build_project_fixture(workspace / "project", task, "v3")
-            score = score_output(task, validate_agent_output(output, task["id"]), workspace, require_exact_tokenizer())
+            score = score_output(task, validate_agent_output(output, task["id"]), workspace, require_exact_tokenizer(), output["loaded_files"])
         self.assertTrue(score["scores"]["required_record_recall_at_3"])
         self.assertFalse(score["scores"]["required_fact_extraction"])
         self.assertTrue(score["scores"]["contradiction_flag_accuracy"])
@@ -195,6 +198,7 @@ class LiveTaskContractTests(unittest.TestCase):
             "next_action_id": None,
             "resume_success": False,
             "abstained": True,
+            "unstable_boundary": False,
             "answer": "I cannot return a secret that canonical memory must not contain.",
         }
         with tempfile.TemporaryDirectory(prefix="mlc-live-abstention-score-") as temporary:
@@ -203,7 +207,7 @@ class LiveTaskContractTests(unittest.TestCase):
             skill.parent.mkdir(parents=True)
             skill.write_text("local evaluation skill\n", encoding="utf-8")
             build_project_fixture(workspace / "project", task, "v3")
-            score = score_output(task, validate_agent_output(output, task["id"]), workspace, require_exact_tokenizer())
+            score = score_output(task, validate_agent_output(output, task["id"]), workspace, require_exact_tokenizer(), output["loaded_files"])
         self.assertTrue(score["scores"]["abstention_accuracy"])
         self.assertFalse(score["scores"]["abstention_output_contract"])
 
@@ -255,7 +259,8 @@ class LiveTaskContractTests(unittest.TestCase):
             **metadata,
             "status": "scored",
             "latency_ms": 1.0,
-            "usage": {},
+            "usage": {"input_tokens": 5},
+            "observed_files": [],
             "agent_output": {},
             "scores": {},
             "memory_overhead_tokens": 1,
@@ -324,6 +329,7 @@ class LiveTaskContractTests(unittest.TestCase):
             "next_action_id": None,
             "resume_success": False,
             "abstained": True,
+            "unstable_boundary": False,
             "answer": "unknown",
         }
         with self.assertRaises(ContractError) as caught:

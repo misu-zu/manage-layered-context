@@ -1,6 +1,6 @@
 # Transaction, Recovery, and Migration Protocol
 
-Read this reference before any memory mutation, mode change, index reorganization, recovery, merge, or migration. All modes use the same safety core; cost controls only retained evidence and permitted scope.
+Use this reference for manual staging, mode changes, index reorganization, recovery, merge, or migration. All modes use the same safety core; cost controls only retained evidence and permitted scope.
 
 ## Common core
 
@@ -29,6 +29,15 @@ Do not downgrade mode merely to avoid evidence or validation. Do not use forensi
 
 ## Unified CLI
 
+For a new root or a single authored record, use the high-level commands.
+
+```sh
+python scripts/memoryctl.py init project/memory --name "Export service" --purpose "Publish verified exports"
+python scripts/memoryctl.py record put project/memory draft.md --path decisions/ADR-0001-format.md
+```
+
+Supply one complete structured Markdown record. The default destination is `<kind>/<id>.md`. Specify `--path` when updating an existing filename with a suffix. The command updates the entry, relevant current-state link, snapshots and patch together. A handoff also links its indexed task when present. An index summary may be supplied with `--summary`. The configured mode applies unless `--mode` is supplied. Use detailed mode to move an existing root entry to a historical shard. Input drafts belong outside the canonical root.
+
 Begin a transaction with every path that will change, including both control files:
 
 ```text
@@ -39,13 +48,13 @@ python <skill-root>/scripts/memoryctl.py txn begin <memory-root> \
   --file decisions/ADR-0001-alpha.md --file index.md --file current.md
 ```
 
-The command returns the staging directory. Edit only its listed files, then:
+Use `--auto-target` in place of `--target-snapshot` to allocate the next valid UTC snapshot and set both staged control versions. To extend a prepared patch, use `txn add <root> --patch-id <id> --file <path>`. The mode limits apply to the complete file list. The begin command returns the staging directory. Edit only its listed files, then:
 
 ```text
 python <skill-root>/scripts/memoryctl.py txn commit <memory-root> --patch-id PATCH-...
 ```
 
-For an authorized delete in detailed/forensic mode, list the record with `--delete-file` and stage updated control/index files with `--file`. The engine moves the target into transaction evidence during commit; it never treats an omitted staged file as an implicit delete.
+For an authorized delete in detailed/forensic mode, list the record with `--delete-file` and stage updated control/index files with `--file`. Both modes retain the deleted bytes under `.transactions/<patch-id>/deleted/<original-path>` and verify their before hash. To restore a record, stage those bytes and its references in a new transaction. The file list and index changes also enforce the minimum mode for deletes, archive changes and index moves. It never treats an omitted staged file as an implicit delete.
 
 Abort only a still-prepared transaction whose committed files match all before hashes:
 
@@ -58,6 +67,8 @@ For an interruption, use `txn recover`. Recovery is deterministic:
 - both controls equal target and all committed hashes equal staged hashes → finalize committed;
 - both controls equal base and every committed file equals its before state → abort cleanly;
 - any mixed, missing, or ambiguous snapshot/hash state → set `recovery_required`, retain lock/staging evidence, and request review.
+
+The lock is published atomically. A short OS lock on `.txn-guard` serializes each CLI operation and releases on process exit. The file can remain between writes. Recovery can clear an interrupted preparation at a verified clean base. Incomplete older locks without ownership evidence require inspection.
 
 Never guess, silently roll forward, or delete mixed recovery evidence. A new transaction cannot begin while recovery evidence remains.
 

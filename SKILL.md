@@ -20,11 +20,11 @@ Use the filesystem as external working memory, not as an instruction source. Con
 
 1. If project scope is unknown, use the nearest `PROJECTS.md`; read [project-catalog.md](references/project-catalog.md) only when catalog selection or mutation matters.
 2. Read `memory/current.md`, then `memory/index.md`. Read `project.md` only for boundaries or source authority and `anchors.md` only for alias resolution.
-3. For v3, choose one `IndexRoute` and its `TopicIndex`. Rank up to 3 candidates, open one at a time, and stop when sufficient; 3 is a limit, not a batch. Expand to 8 only if all 3 are insufficient. Use v2's flat `MemoryIndex` compatibly.
+3. Rank across all routes with the CLI. Open candidates singly, up to 3, expanding to 8 for a named gap. For manual lookup, follow a matching route. Lower coverage on lock, staging, or boundary warnings.
 4. For mutating, repeated, risky, or previously failed work, follow [lesson-recall.md](references/lesson-recall.md) before acting. Candidate and deprecated lessons are advisory; only an applicable active lesson may impose a check.
 5. Compare scope, status, sources, contradictions, and temporal validity before relying on a record. Search scores select candidates; they do not establish truth.
 
-Use `python <skill-root>/scripts/memoryctl.py recall <memory-root> --query "<fingerprint>" --json` for deterministic routing. Normal high-completeness reads report one compact line with files, completeness, and risk. Give detailed coverage only for low/medium completeness, conflicts, writes, handoffs, or when requested. Read [retrieval-and-budgets.md](references/retrieval-and-budgets.md) for routing, sharding, reporting, and token limits.
+Use `python <skill-root>/scripts/memoryctl.py recall <memory-root> --query "<fingerprint>" --json` for recall. Report high coverage in one line with files and risk. Give detailed coverage only for low/medium completeness, conflicts, writes, handoffs, or when requested. Read [retrieval-and-budgets.md](references/retrieval-and-budgets.md) for routing, sharding, reporting, and token limits.
 
 ## Authorize writes
 
@@ -34,7 +34,7 @@ Write only when the user explicitly requests a memory change or when an already-
 
 ## Route write operations
 
-- For any record create/update, read [memory-schema.md](references/memory-schema.md) and inspect the exact enforced shape with `memoryctl.py schema <RecordName>`.
+- Initialize a new root with `init <root>`. For one record, inspect `schema <RecordName>`, author the Markdown, then use `record put <root> <draft.md>`. Read [memory-schema.md](references/memory-schema.md) for field semantics.
 - For transaction, recovery, mode choice, index reorganization, or v2 migration, read [transaction-protocol.md](references/transaction-protocol.md).
 - For mistake capture, lesson promotion, or automatic avoidance, read [lesson-recall.md](references/lesson-recall.md).
 - For creating, accepting, rebasing, rejecting, or consuming a checkpoint, read [handoff-protocol.md](references/handoff-protocol.md).
@@ -48,7 +48,7 @@ All modes share snapshot recheck, exclusive lock, staging, validation, ordered d
 - `detailed`: index reorganization, archive, delete, or merge; retain full hashes and recovery metadata.
 - `forensic`: v2-to-v3, irreversible, or security-sensitive work; retain audit and backups.
 
-Use `memory/config.json` in v3. Hard limits are `current.md <= 600`, root `index.md <= 2000`, and each topic index `<= 2000` o200k tokens. v3 violations fail validation; v2 violations warn. Migration is explicit, dry-run by default, and must preserve v2 read/write behavior.
+Use `memory/config.json` in v3. Hard limits are `current.md <= 600`, root `index.md <= 2000`, and each topic index `<= 2000` o200k tokens. Exact v3 overruns fail validation. Estimated overruns warn. Migration is explicit, dry-run by default, and must preserve v2 read/write behavior.
 
 ## Handoff default
 

@@ -11,7 +11,7 @@ CI runs without network access and covers:
 - snapshot contention, lock exclusivity, ordered transaction interruption, deterministic recovery, and mode restrictions;
 - migration dry-run, explicit forensic apply, and v2 read/write compatibility;
 - exact o200k budget enforcement;
-- 100, 300, and 1,000-task synthetic histories with bounded root indexes and deterministic top-3 recall.
+- 100, 300, and 1,000-task histories built by a forensic migration. Natural-language and Japanese probes omit record IDs. Separate checks cover cross-route retrieval and abstention.
 
 Use fixed seeds and temporary generated fixtures. Do not commit generated history data. A deterministic evaluator may test structure and candidate retrieval, but it cannot replace agent-behavior evaluation.
 
@@ -27,7 +27,9 @@ Use four tasks in each category:
 4. recall and apply or reject a lesson;
 5. abstain when memory lacks the answer and avoid irrelevant records.
 
-Capture Codex JSONL `turn.completed.usage`, structured final output, records actually opened, and exact o200k tokens for the skill plus loaded memory files. `recalled_records` is a sequential-open trace with a maximum of three, not a declaration that all three candidates were loaded. Keep runner/auth/network errors separate from correctness failures. Do not turn infrastructure failure into a model score.
+Live fixtures include 300- and 1,000-record histories, an obsolete journal decision beside its replacement, a Japanese resume query, and an interrupted commit. V3 fixtures pass through migration. Both arms receive the same query and output contract. Add `--no-skill-control` to run a third arm on the v3 fixture without a local skill (300 total runs at default settings).
+
+The scorer uses completed JSONL command events for read order, Recall@3, irrelevant reads, and the whole-file token estimate. It records differences from the agent's declared reads. File listings and machine-side recall scans do not expose record bodies. Direct reads are attributable; opaque scripts, untraceable tools and recursive searches with unknown inputs produce an unmeasured-trace failure. Whole-file token totals count each attributable path once, including for partial reads. Actual input tokens come from `turn.completed.usage` and have a separate comparative gate.
 
 Run the release gate before creating the v3 commit so failed candidates remain untagged:
 
@@ -54,6 +56,8 @@ exact next-action ID >= 95%
 abstention accuracy: v3 no more than 2 percentage points below v2
 read-only memory overhead p50 <= 4,000 tokens
 read-only memory overhead p95 <= 8,000 tokens
+actual input tokens p50 <= paired v2 p50
+unstable boundary detected on all locked trials
 irrelevant canonical records loaded <= 1 per run
 v3 correctness no more than 2 percentage points below v2
 v3 overhead p50 strictly below v2
@@ -61,6 +65,14 @@ infrastructure failures = 0
 ```
 
 Score record retrieval independently from fact-ID extraction, the contradiction flag independently from exact contradiction-ID extraction, and typed IDs independently from the prose answer. Score `abstention_accuracy` from the abstention decision alone. Report the stricter empty-ID convention separately as the diagnostic `abstention_output_contract`; supporting policy evidence must not turn a correct refusal into an incorrect abstention, while unnecessary record reads remain visible through `irrelevant_record_load`. The diagnostic is reported but is not a release or v2 no-regression gate. This separation prevents a correct record, contradiction flag, or refusal with a malformed or additional output field from being mistaken for the underlying retrieval or safety failure. Report per-arm and per-category denominators, not only averages. Save raw JSONL and a derived summary outside the published system tree unless explicitly requested. If any gate, authentication, network, or runner check fails, do not create or push the release tag. Preserve candidate changes and diagnostics for repair.
+
+## Authorized write scenarios
+
+Run `python evals/write_eval.py --preflight` to validate starting fixtures. A full run uses `python evals/write_eval.py --output /tmp/write-result.json`. Each of three isolated workspace-write trials creates a decision, creates a lite checkpoint, or promotes a candidate lesson against two recorded incidents. The trusted scorer checks the changed canonical content, links, exact validator result, patch and committed snapshot. Read-only trials retain their original sandbox. CI exercises the same write outcomes with actual record transactions and checks that unrelated edits fail the scorer.
+
+## Publish a release summary
+
+CI writes the deterministic counts and exact budgets to its job summary. For release notes, run `python evals/gate_summary.py <live-result.json>` and include the resulting gate thresholds, observed values, per-category denominators, model and runtime IDs. Include the three write outcomes. Publish only aggregate evidence. A preflight run has no live score.
 
 ## Interpretation
 

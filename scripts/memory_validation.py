@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
@@ -15,6 +18,8 @@ from memory_model import (
     ParsedCall,
     RecordSyntaxError,
     TokenizerUnavailable,
+    TEMPLATE_ROOT,
+    validate_snapshot,
     V3_REQUIRED_FIELDS,
     count_tokens,
     load_config,
@@ -44,7 +49,69 @@ RECORD_TYPES = {
     "archive": "ArchiveRecord",
     "patches": "ContextPatch",
 }
-PLACEHOLDER_MARKERS = ("<", ">", "YYYY", "NNNN", "...")
+CURRENT_FIELDS = {
+    "decisions": ("active_decisions", "decision"),
+    "issues": ("open_issues", "issue"),
+    "conflicts": ("unresolved_conflicts", "conflict"),
+    "lessons": ("active_lessons", "lesson"),
+    "tasks": ("active_tasks", "task"),
+    "handoffs": ("latest_handoff", "handoff"),
+    "patches": ("pending_patches", "patch"),
+}
+SECRET_PATTERN = re.compile(
+    rb"\b(?:AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9_-]{20,})\b"
+    rb"|-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+)
+
+
+@lru_cache(maxsize=1)
+def _template_placeholders() -> frozenset[str]:
+    markers = set()
+    for path in TEMPLATE_ROOT.parent.rglob("*.md"):
+        for value in re.findall(r'"([^"\n]+)"', path.read_text(encoding="utf-8")):
+            if re.search(r"<[^<>]+>|YYYY|NNNN", value):
+                markers.add(value)
+    return frozenset(markers)
+
+
+def record_id(call: ParsedCall) -> str:
+    if call.name == "HandoffCheckpoint":
+        return call.fields["checkpoint_id"]
+    if call.name == "ContextPatch":
+        return call.fields["patch_id"]
+    return call.fields["id"]
+
+
+def record_status(call: ParsedCall) -> str:
+    return call.fields.get("status", call.fields.get("resolution_status", "archived"))
+
+
+def index_status(call: ParsedCall) -> str:
+    status = record_status(call)
+    if status in {"completed", "archived", "resolved", "consumed", "rejected"}:
+        return "archived"
+    if status in {"deprecated", "superseded"}:
+        return "deprecated"
+    if status in {"candidate", "tentative", "draft"}:
+        return "scratch"
+    return "active"
+
+
+def transaction_warnings(root: Path) -> list[str]:
+    warnings = []
+    if (root / ".update-lock").exists():
+        warnings.append("active .update-lock; the memory may change during this read")
+    staging = root / ".staging"
+    if staging.is_dir():
+        for patch in sorted(staging.iterdir()):
+            warnings.append(f"staging evidence: .staging/{patch.name}")
+            try:
+                manifest = json.loads((patch / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if isinstance(manifest, dict) and manifest.get("status") == "recovery_required":
+                warnings.append(f"recovery_required: {patch.name}")
+    return warnings
 
 
 @dataclass
@@ -52,6 +119,8 @@ class Findings:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     info: list[str] = field(default_factory=list)
+
+    boundary_matches: bool = False
 
     @property
     def ok(self) -> bool:
@@ -63,6 +132,7 @@ class Findings:
             "errors": self.errors,
             "warnings": self.warnings,
             "info": self.info,
+            "boundary_matches": self.boundary_matches,
         }
 
 
@@ -81,6 +151,9 @@ def _parse_file(
 ) -> ParsedCall | None:
     text = _read(path, findings)
     if text is None:
+        return None
+    if SECRET_PATTERN.search(text.encode("utf-8")):
+        findings.errors.append(f"{path.name}: possible credential or private key")
         return None
     try:
         calls = parse_markdown(text, path.as_posix())
@@ -117,7 +190,7 @@ def _walk_values(value: Any) -> Iterable[Any]:
 
 def _validate_no_placeholders(call: ParsedCall, path: Path, findings: Findings) -> None:
     for value in _walk_values(call):
-        if isinstance(value, str) and any(marker in value for marker in PLACEHOLDER_MARKERS):
+        if isinstance(value, str) and value.strip() in _template_placeholders():
             findings.errors.append(f"{path.name}: unresolved placeholder: {value}")
 
 
@@ -168,6 +241,7 @@ def _safe_glob(root: Path, pattern: str, label: str, findings: Findings) -> set[
         or ".." in pure.parts
         or len(pure.parts) != 2
         or pure.parts[0] != "indexes"
+        or "**" in pure.name
     ):
         findings.errors.append(f"{label} must be a one-level relative indexes/ glob: {pattern}")
         return set()
@@ -277,20 +351,28 @@ def _validate_entry_paths(
     return seen
 
 
+def _check_snapshot(value: str, label: str, findings: Findings) -> None:
+    try:
+        validate_snapshot(value)
+    except ValueError as exc:
+        findings.errors.append(f"{label}: {exc}")
+
+
 def _validate_indexes(
     root: Path,
     schema_version: int,
     snapshot: str | None,
     findings: Findings,
-) -> tuple[set[str], ParsedCall | None]:
+) -> tuple[dict[str, ParsedCall], ParsedCall | None]:
     index_path = root / "index.md"
     if not index_path.is_file():
-        return set(), None
+        return {}, None
     expected = ("MemoryIndex", "ActiveMemoryIndex")
     index = _parse_file(index_path, findings, expected)
     if index is None:
-        return set(), None
+        return {}, None
     index_snapshot = index.fields["snapshot_id"]
+    findings.boundary_matches = snapshot == index_snapshot
     if snapshot is not None and index_snapshot != snapshot:
         findings.errors.append(
             f"commit boundary mismatch: current.md={snapshot} index.md={index_snapshot}"
@@ -298,12 +380,13 @@ def _validate_indexes(
     if schema_version == 3 and index.name != "ActiveMemoryIndex":
         findings.errors.append("v3 config requires ActiveMemoryIndex in index.md")
     if schema_version == 2 and index.name == "ActiveMemoryIndex":
-        findings.warnings.append("v3 index found without config.json; treat root as incomplete v3")
+        findings.errors.append("v3 index requires config.json")
 
     reachable = _validate_entry_paths(root, _index_entries(index), "index.md", findings)
+    entries = {entry.fields["path"].replace("\\", "/"): entry for entry in _index_entries(index)}
     if index.name == "MemoryIndex":
         findings.info.append(f"validated indexed paths: {len(reachable)}")
-        return reachable, index
+        return entries, index
 
     for entry in _index_entries(index):
         if entry.fields["status"] != "active":
@@ -335,6 +418,7 @@ def _validate_indexes(
             findings.errors.append(
                 f"topic shard is not reachable from an index route: {shard_path.relative_to(root).as_posix()}"
             )
+        _check_snapshot(shard.fields["snapshot_id"], shard_path.name, findings)
         if snapshot is not None and shard.fields["snapshot_id"] > snapshot:
             findings.errors.append(
                 f"topic shard snapshot is newer than commit boundary: "
@@ -347,6 +431,7 @@ def _validate_indexes(
                 f"paths duplicated between root and topic indexes: {', '.join(sorted(overlap))}"
             )
         reachable.update(paths)
+        entries.update((entry.fields["path"].replace("\\", "/"), entry) for entry in _index_entries(shard))
         archive_route = shard.fields["archive_route"]
         if archive_route is not None:
             candidate = _safe_relative(root, archive_route, "archive_route", findings)
@@ -360,7 +445,12 @@ def _validate_indexes(
     findings.info.append(
         f"validated root entries: {len(_index_entries(index))}; topic shards: {shard_count}; reachable paths: {len(reachable)}"
     )
-    return reachable, index
+    for relative, entry in entries.items():
+        version = entry.fields["record_snapshot_id"]
+        _check_snapshot(version, relative, findings)
+        if snapshot and version > snapshot:
+            findings.errors.append(f"{relative}: record_snapshot_id newer than commit boundary")
+    return entries, index
 
 
 def _canonical_records(root: Path) -> set[str]:
@@ -436,84 +526,97 @@ def _project_path(
         findings.errors.append(f"{source.name}: deleted_files path still exists: {raw}")
 
 
-def _validate_handoffs(
-    root: Path,
-    project_root: Path | None,
-    snapshot: str | None,
-    schema_version: int,
-    findings: Findings,
+def _validate_handoff(
+    call: ParsedCall, path: Path, project_root: Path | None, snapshot: str | None, findings: Findings,
 ) -> None:
-    directory = root / "handoffs"
-    if not directory.is_dir():
-        return
-    count = 0
-    for path in sorted(directory.glob("*.md")):
-        if path.name.startswith("_"):
-            continue
-        count += 1
-        call = _parse_file(path, findings, "HandoffCheckpoint")
-        if call is None:
-            continue
-        _validate_v3_identifier_fields(call, path, root, schema_version, findings)
-        fields = call.fields
-        profile = fields.get("profile", "full")
-        checkpoint_snapshot = (
-            fields.get("checkpoint_snapshot_id")
-            if profile == "lite"
-            else fields.get("last_updated_snapshot_id")
+    fields = call.fields
+    profile = fields.get("profile", "full")
+    checkpoint_snapshot = (
+        fields.get("checkpoint_snapshot_id")
+        if profile == "lite"
+        else fields.get("last_updated_snapshot_id")
+    )
+    if fields["status"] in {"ready", "accepted"} and snapshot and checkpoint_snapshot != snapshot:
+        findings.warnings.append(
+            f"{path.name}: {fields['status']} checkpoint targets {checkpoint_snapshot}, current is {snapshot}"
         )
-        if fields["status"] in {"ready", "accepted"} and snapshot and checkpoint_snapshot != snapshot:
-            findings.warnings.append(
-                f"{path.name}: {fields['status']} checkpoint targets {checkpoint_snapshot}, current is {snapshot}"
-            )
-        if fields["status"] == "ready" and fields["next_action"] is None:
-            findings.warnings.append(f"{path.name}: ready checkpoint has no next_action")
-        if fields["status"] in {"ready", "accepted"} and project_root is not None:
-            for value in fields.get("artifacts", []):
-                _project_path(value, project_root, path, "artifacts", True, findings)
-            for value in fields["changed_files"]:
-                _project_path(value, project_root, path, "changed_files", True, findings)
-            for value in fields.get("deleted_files", []):
-                _project_path(value, project_root, path, "deleted_files", False, findings)
-    findings.info.append(f"validated handoff records: {count}")
+    if fields["status"] == "ready" and fields["next_action"] is None:
+        findings.warnings.append(f"{path.name}: ready checkpoint has no next_action")
+    if fields["status"] in {"ready", "accepted"} and project_root is not None:
+        for value in fields.get("artifacts", []):
+            _project_path(value, project_root, path, "artifacts", True, findings)
+        for value in fields["changed_files"]:
+            _project_path(value, project_root, path, "changed_files", True, findings)
+        for value in fields.get("deleted_files", []):
+            _project_path(value, project_root, path, "deleted_files", False, findings)
 
 
-def _validate_lessons(root: Path, schema_version: int, findings: Findings) -> None:
-    directory = root / "lessons"
-    if not directory.is_dir():
-        return
-    count = 0
-    for path in sorted(directory.glob("*.md")):
-        if path.name.startswith("_"):
-            continue
-        count += 1
-        call = _parse_file(path, findings, "Lesson")
-        if call is None:
-            continue
-        _validate_v3_identifier_fields(call, path, root, schema_version, findings)
-        if call.fields["status"] == "active" and not call.fields["supporting_evidence"]:
-            findings.warnings.append(f"{path.name}: active lesson has no supporting evidence")
-    findings.info.append(f"validated lesson records: {count}")
-
-
-def _validate_record_schemas(root: Path, schema_version: int, findings: Findings) -> None:
-    count = 0
+def _validate_records(
+    root: Path, schema_version: int, project_root: Path | None, current: ParsedCall | None,
+    indexed: dict[str, ParsedCall], findings: Findings,
+) -> None:
+    snapshot = current.fields["snapshot_id"] if current else None
+    ids: dict[str, str] = {}
+    references = {name: defaultdict(set) for name in CURRENT_FIELDS}
+    active_paths = set()
+    unresolved = set()
     for directory_name, record_type in RECORD_TYPES.items():
-        if directory_name in {"lessons", "handoffs"}:
-            continue
-        directory = root / directory_name
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.rglob("*.md")):
-            if path.name.startswith("_") or (
-                directory_name == "archive" and path.name == "manifest.md"
-            ):
+        for path in sorted((root / directory_name).rglob("*.md")):
+            relative = path.relative_to(root).as_posix()
+            if path.name.startswith("_") or relative == "archive/manifest.md":
                 continue
-            count += 1
             call = _parse_file(path, findings, record_type)
-            if call is not None:
-                _validate_v3_identifier_fields(call, path, root, schema_version, findings)
-    findings.info.append(f"validated structured record schemas: {count}")
+            if call is None:
+                continue
+            _validate_v3_identifier_fields(call, path, root, schema_version, findings)
+            if call.name == "HandoffCheckpoint":
+                _validate_handoff(call, path, project_root, snapshot, findings)
+            if call.name == "Lesson" and call.fields["status"] == "active" and not call.fields["supporting_evidence"]:
+                findings.warnings.append(f"{path.name}: active lesson has no supporting evidence")
+            if schema_version != 3:
+                continue
+            identifier = record_id(call)
+            if not identifier or not (path.stem == identifier or path.stem.startswith(identifier + "-")):
+                findings.errors.append(f"{relative}: filename does not match record ID {identifier!r}")
+            if identifier in ids:
+                findings.errors.append(f"duplicate record ID {identifier}: {relative} and {ids[identifier]}")
+            ids[identifier] = relative
+            for key, value in call.fields.items():
+                if key.endswith("snapshot_id") and value is not None:
+                    _check_snapshot(value, f"{relative} {key}", findings)
+            entry = indexed.get(relative)
+            if entry and entry.fields["status"] != index_status(call):
+                findings.errors.append(
+                    f"{relative}: index status {entry.fields['status']} conflicts with record status {record_status(call)}"
+                )
+            if directory_name in CURRENT_FIELDS:
+                _, prefix = CURRENT_FIELDS[directory_name]
+                names = {identifier, f"{prefix}:{identifier}", relative, *call.fields.get("anchors", []), *call.fields.get("relevant_anchors", [])}
+                if record_status(call) == "unresolved":
+                    unresolved.add(relative)
+                if index_status(call) == "active":
+                    active_paths.add(relative)
+                for name in names:
+                    references[directory_name][name].add(relative)
+
+    if current and schema_version == 3:
+        listed_conflicts = set()
+        for kind, (key, _) in CURRENT_FIELDS.items():
+            values = current.fields.get(key) or []
+            if isinstance(values, str):
+                values = [values]
+            for ref in values:
+                matches = references[kind].get(ref, set())
+                if not matches:
+                    findings.errors.append(f"current.md: {key} references missing {kind} record: {ref}")
+                elif len(matches) > 1:
+                    findings.errors.append(f"current.md: ambiguous {key} reference {ref}; use a record ID or path")
+                elif kind in {"decisions", "lessons", "issues", "tasks", "conflicts"} and matches.isdisjoint(active_paths):
+                    findings.errors.append(f"current.md: inactive record in {key}: {ref}")
+                elif kind == "conflicts":
+                    listed_conflicts.update(matches)
+        for relative in sorted(unresolved - listed_conflicts):
+            findings.errors.append(f"unresolved conflict missing from current.md: {relative}")
 
 
 def _validate_catalog(path: Path, findings: Findings) -> None:
@@ -538,7 +641,7 @@ def _validate_catalog(path: Path, findings: Findings) -> None:
     findings.info.append(f"validated project catalog entries: {len(project_ids)}")
 
 
-def budget_report(root: Path, require_exact: bool = False) -> dict[str, Any]:
+def budget_report(root: Path, require_exact: bool = False, *, paths: set[str] | None = None) -> dict[str, Any]:
     if (root / "SKILL.md").is_file() and not (root / "current.md").is_file():
         measurement = count_tokens(
             (root / "SKILL.md").read_text(encoding="utf-8"),
@@ -568,7 +671,7 @@ def budget_report(root: Path, require_exact: bool = False) -> dict[str, Any]:
     if (root / "indexes").is_dir():
         targets.extend(("topic_index", path) for path in sorted((root / "indexes").rglob("*.md")) if not path.name.startswith("_"))
     for kind, path in targets:
-        if not path.is_file():
+        if not path.is_file() or (paths is not None and path.relative_to(root).as_posix() not in paths):
             continue
         measurement = count_tokens(
             path.read_text(encoding="utf-8"),
@@ -592,9 +695,9 @@ def budget_report(root: Path, require_exact: bool = False) -> dict[str, Any]:
     return {"schema_version": schema_version, "items": items}
 
 
-def _validate_budgets(root: Path, schema_version: int, findings: Findings, require_exact: bool) -> None:
+def _validate_budgets(root: Path, schema_version: int, findings: Findings, require_exact: bool, paths: set[str] | None) -> None:
     try:
-        report = budget_report(root, require_exact=require_exact)
+        report = budget_report(root, require_exact=require_exact, paths=paths)
     except (ConfigError, TokenizerUnavailable, OSError, UnicodeError) as exc:
         findings.errors.append(str(exc))
         return
@@ -605,7 +708,7 @@ def _validate_budgets(root: Path, schema_version: int, findings: Findings, requi
             f"target={item['target']} hard={item['hard']}"
         )
         if item["over_hard"]:
-            (findings.errors if schema_version == 3 else findings.warnings).append(
+            (findings.errors if schema_version == 3 and item["exact"] else findings.warnings).append(
                 f"budget hard limit exceeded: {message}"
             )
         elif item["over_target"]:
@@ -622,6 +725,7 @@ def validate_memory(
     strict_v3: bool = False,
     require_exact_tokens: bool = False,
     logical_root: Path | None = None,
+    budget_paths: set[str] | None = None,
 ) -> Findings:
     root = root.resolve()
     findings = Findings()
@@ -635,10 +739,13 @@ def validate_memory(
         schema_version = 3 if (root / "config.json").exists() else 2
     if strict_v3 and schema_version != 3:
         findings.errors.append("--strict-v3 requires config.json with schema_version 3")
+    findings.warnings.extend(transaction_warnings(root))
     _validate_structure(root, schema_version, strict_v2, strict_v3, findings)
 
     current = _parse_file(root / "current.md", findings, "ProjectState") if (root / "current.md").is_file() else None
     snapshot = current.fields["snapshot_id"] if current else None
+    if snapshot is not None and schema_version == 3:
+        _check_snapshot(snapshot, "current.md", findings)
     project_root = _validate_project_map(
         root,
         findings,
@@ -647,12 +754,10 @@ def validate_memory(
     _parse_file(root / "anchors.md", findings, "AnchorRegistry") if (root / "anchors.md").is_file() else None
     indexed, _ = _validate_indexes(root, schema_version, snapshot, findings)
     manifest_paths = _validate_archive_manifest(root, findings)
-    _validate_reachability(root, schema_version, indexed, manifest_paths, findings)
-    _validate_handoffs(root, project_root, snapshot, schema_version, findings)
-    _validate_lessons(root, schema_version, findings)
-    _validate_record_schemas(root, schema_version, findings)
-    _validate_budgets(root, schema_version, findings, require_exact_tokens)
-    if snapshot and not any("commit boundary mismatch" in error for error in findings.errors):
+    _validate_reachability(root, schema_version, set(indexed), manifest_paths, findings)
+    _validate_records(root, schema_version, project_root, current, indexed, findings)
+    _validate_budgets(root, schema_version, findings, require_exact_tokens, budget_paths)
+    if findings.boundary_matches:
         findings.info.append(f"committed snapshot: {snapshot}")
     if catalog is not None:
         _validate_catalog(catalog.resolve(), findings)

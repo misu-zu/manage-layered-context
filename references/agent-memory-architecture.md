@@ -50,14 +50,7 @@ Recency alone does not prove truth. Preserve superseded decisions and temporal h
 
 ## Retrieval design
 
-Use constrained, explainable retrieval. V3 follows `current -> active root index -> one topic shard -> rank up to 3 candidates -> open one at a time`, expanding the candidate limit to 8 only when coverage is insufficient:
-
-1. project namespace filter;
-2. record status and type filter;
-3. exact ID, anchor, filename, and symptom matches;
-4. lexical or optional semantic similarity;
-5. reranking by scope, evidence quality, and temporal validity;
-6. agent opens rank 1, assesses coverage, and reads the next canonical record only for a named remaining gap.
+After reading the committed state, use the CLI to score all canonical records of the requested kinds. Machine-side scanning keeps unrelated bodies out of the prompt. For a manual lookup, follow the root route into a topic shard. Open up to three ranked records one at a time. Expand the candidate limit to eight if evidence is still missing. Check the record's scope, source and status before relying on it.
 
 Keep relevance and severity separate. A returned candidate list is an upper bound, not a batch read list. Topic-shard `snapshot_id` records when that shard last changed; it may be older than the current boundary, avoiding a rewrite of every shard on every update. Limit returned candidates, stop opening records once sufficient, and disclose material unread risk when completeness is not high. Record the projection snapshot so stale indexes are detectable.
 

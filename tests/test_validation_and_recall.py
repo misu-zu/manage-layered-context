@@ -4,13 +4,14 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from memory_model import ParsedCall  # noqa: E402
+from memory_model import ParsedCall, TokenMeasurement  # noqa: E402
 from memory_recall import recall  # noqa: E402
 from memory_transaction import render_markdown  # noqa: E402
 from memory_validation import budget_report, primary_anchor, validate_memory  # noqa: E402
@@ -131,8 +132,13 @@ class ValidationTests(unittest.TestCase):
             memory = make_project(Path(raw), version=3)
             with (memory / "current.md").open("a", encoding="utf-8") as handle:
                 handle.write("\n" + "overflow " * 5000)
-            findings = validate_memory(memory, strict_v3=True)
-            self.assertTrue(any("budget hard limit exceeded" in error for error in findings.errors))
+            for exact in (False, True):
+                measurement = TokenMeasurement(9000, "o200k_base", exact, "test")
+                with self.subTest(exact=exact), patch("memory_validation.count_tokens", return_value=measurement):
+                    findings = validate_memory(memory, strict_v3=True)
+                    self.assertEqual(exact, any("budget hard limit exceeded" in e for e in findings.errors))
+                    self.assertEqual(not exact, any("budget hard limit exceeded" in w for w in findings.warnings))
+
 
     def test_v2_hard_budget_is_only_a_warning(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -198,7 +204,7 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(3, result["top"])
             self.assertEqual("decisions/ADR-0001-alpha.md", result["candidates"][0]["path"])
 
-    def test_irrelevant_topic_route_is_not_loaded(self) -> None:
+    def test_all_routes_are_considered_without_requiring_a_route_name(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             memory = make_project(Path(raw), version=3)
             archive = call(
@@ -234,8 +240,11 @@ class RecallTests(unittest.TestCase):
         ),\n'''
             write(memory / "index.md", root_index.replace("    ],\n)", omega_route + "    ],\n)"))
             result = recall(memory, "alpha amber decision")
-            self.assertNotIn("route:omega", result["selected_routes"])
-            self.assertEqual(1, result["records_considered"])
+            self.assertIn("route:omega", result["selected_routes"])
+            self.assertEqual(2, result["records_considered"])
+            self.assertEqual("decisions/ADR-0001-alpha.md", result["candidates"][0]["path"])
+            result = recall(memory, "history", kinds=("archive",))
+            self.assertEqual(archive_path, result["candidates"][0]["path"])
 
     def test_recall_declares_candidates_as_a_sequential_upper_bound(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -10,7 +10,7 @@ Use this read path:
 PROJECTS.md when needed
   -> current.md
   -> root index.md
-  -> one matching indexes/<topic>.md
+  -> recall across the project (or follow a topic shard manually)
   -> rank up to 3 candidates
   -> open rank 1, assess, then continue one at a time if needed
   -> raise the candidate limit to 8 only if the first 3 are insufficient
@@ -18,7 +18,7 @@ PROJECTS.md when needed
 
 `project.md` is conditional orientation, not a mandatory read. `anchors.md` is conditional alias resolution. Do not read every topic shard merely because a root route contains a broad glob. Prefer route summaries and anchor prefixes that let an agent choose a single semantic family.
 
-The deterministic helper follows the same policy:
+The helper reads canonical records on disk, including archive-manifest-only records. It uses all topic routes and entry summaries as ranking signals. Only the bounded candidate list enters the agent context.
 
 ```text
 python <skill-root>/scripts/memoryctl.py recall <memory-root> \
@@ -31,14 +31,9 @@ The configured default is a candidate limit of 3. It is not a number of files to
 
 Include the selected project, operation, affected components/artifacts, exact error fragments, acceptance criteria, and hard constraints. For risky work also include likely lesson signals such as `operation:migrate`, `risk:destructive-path-resolution`, tool name, platform, and artifact type.
 
-Filter in this order:
+Use `--kinds` for a record family and `--status` for a record or index status. The CLI applies lexical matching after Unicode normalization, drops English function words, gives route matches a bounded bonus, and downranks deprecated and superseded records. Ties prefer the more recent indexed snapshot. An empty result sets `no_confident_match`. Check scope, evidence and contradictions in the source record. Each candidate includes its canonical status and indexed snapshot when available.
 
-1. project namespace;
-2. active status and relevant record type;
-3. exact IDs, semantic anchors, filenames, and error signatures;
-4. lexical similarity;
-5. optional semantic similarity;
-6. scope, evidence, contradiction, and temporal-validity reranking.
+`coverage` describes the machine scan. File warnings, a live lock, staged work, or a mixed commit boundary lower it. Unusable routes and shards appear in `unsearched_routes` and `unsearched_shards`. There can still be relevant material outside the selected project or kinds.
 
 If an indexed path is missing, a projection is stale, sources disagree, or a likely shard remains unread, lower completeness and name the gap.
 
@@ -79,7 +74,7 @@ Measure with `o200k_base`:
 python <skill-root>/scripts/memoryctl.py budget <memory-root> --require-exact --json
 ```
 
-CI and release evaluation require exact `tiktoken` counts. Runtime may use the configured conservative fallback when `tiktoken` is unavailable; it must report `exact=false` and the estimation method. In v3, a hard-limit violation is an error. In v2, the same condition is a warning until explicit migration. Target overflow is always a prompt to compress or shard, not proof of corruption.
+CI and release evaluation require exact `tiktoken` counts. Runtime may use the configured conservative fallback when `tiktoken` is unavailable; it must report `exact=false` and the estimation method. Exact v3 hard-limit violations are errors. Estimated violations are warnings. A transaction checks the budgets of changed files, or every budget when config.json changes. Standalone validation always checks the full root. In v2, the same condition is a warning until explicit migration. Target overflow is always a prompt to compress or shard, not proof of corruption.
 
 Keep `current.md` to active goal, hard invariants, active IDs, blockers/conflicts, latest continuation, and immediate actions. Move rationale and evidence to canonical records. Keep index summaries to one discriminating line.
 

@@ -12,9 +12,11 @@
     "next_action_id",
     "resume_success",
     "abstained",
+    "unstable_boundary",
     "answer"
   ],
   "properties": {
+    "unstable_boundary": {"type": "boolean", "description": "The observed memory has an incomplete or in-progress commit."},
     "task_id": {"type": "string", "description": "Exact evaluation task identifier."},
     "loaded_files": {
       "type": "array",
@@ -24,7 +26,7 @@
     "recalled_records": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Canonical detail records actually opened, in sequential open order; top 3 is an upper bound and every path must also appear in loaded_files."
+      "description": "The first three distinct canonical records actually read, in order, using the paths from loaded_files."
     },
     "fact_ids": {
       "type": "array",

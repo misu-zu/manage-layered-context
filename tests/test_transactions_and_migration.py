@@ -21,6 +21,7 @@ from memory_transaction import (  # noqa: E402
     staged_path,
     render_markdown,
 )
+from memory_writes import put_record
 from memory_validation import validate_memory  # noqa: E402
 from support import entry, make_project, replace_snapshot, write  # noqa: E402
 
@@ -42,6 +43,7 @@ class TransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             memory = make_project(Path(raw), version=3, snapshot=BASE)
             patch_id = "PATCH-20260830-010100-delete"
+            original = (memory / "decisions/ADR-0001-alpha.md").read_bytes()
             begin_transaction(
                 memory,
                 patch_id=patch_id,
@@ -66,6 +68,11 @@ class TransactionTests(unittest.TestCase):
             result = commit_transaction(memory, patch_id)
             self.assertEqual("committed", result["status"])
             self.assertFalse((memory / "decisions" / "ADR-0001-alpha.md").exists())
+            retained = memory / ".transactions" / patch_id / "deleted/decisions/ADR-0001-alpha.md"
+            self.assertEqual(original, retained.read_bytes())
+            self.assertEqual([], validate_memory(memory, strict_v3=True).errors)
+            restored = put_record(memory, retained, path="decisions/ADR-0001-alpha.md")
+            self.assertEqual(original, (memory / restored["path"]).read_bytes())
             self.assertEqual([], validate_memory(memory, strict_v3=True).errors)
 
     def test_changed_record_requires_target_snapshot_in_index_entry(self) -> None:
@@ -213,8 +220,8 @@ class TransactionTests(unittest.TestCase):
                 begin_transaction(
                     memory,
                     patch_id=patch_id,
-                    mode="standard",
-                    operation="update",
+                    mode="detailed",
+                    operation="index_reorg",
                     target_snapshot_id=TARGET,
                     files=[
                         "current.md",

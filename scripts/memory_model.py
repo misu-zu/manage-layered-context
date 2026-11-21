@@ -8,6 +8,8 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,35 @@ V3_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
 }
 V3_REQUIRED_FIELDS["OpenIssue"] = frozenset({"fact_ids", "contradiction_id"})
 V3_REQUIRED_FIELDS["Conflict"] = frozenset({"fact_ids", "contradiction_id"})
+
+
+SNAPSHOT_RE = re.compile(r"SNAP-([0-9]{8}-[0-9]{6})(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?")
+TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "assets" / "memory-template"
+# Older roots use local wall time. Allow one day for timezone and clock skew.
+SNAPSHOT_SKEW = timedelta(days=1)
+
+
+def validate_snapshot(value: str) -> None:
+    match = SNAPSHOT_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid snapshot ID: {value}")
+    try:
+        stamp = datetime.strptime(match[1], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"invalid snapshot date: {value}") from exc
+    if stamp > datetime.now(timezone.utc) + SNAPSHOT_SKEW:
+        raise ValueError(f"snapshot is too far in the future: {value}")
+
+
+def next_snapshot(base: str | None = None) -> str:
+    now = datetime.now(timezone.utc)
+    if base:
+        validate_snapshot(base)
+        previous = datetime.strptime(base[5:20], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+        now = max(now, previous + timedelta(seconds=1))
+    value = now.strftime("SNAP-%Y%m%d-%H%M%S")
+    validate_snapshot(value)
+    return value
 
 
 class RecordSyntaxError(ValueError):
@@ -549,7 +580,14 @@ def _convert(node: ast.AST, source: str) -> Any:
     if isinstance(node, ast.Dict):
         if any(key is None for key in node.keys):
             raise RecordSyntaxError(f"{source}:{node.lineno}: dictionary unpacking is not allowed")
-        return {_convert(key, source): _convert(value, source) for key, value in zip(node.keys, node.values)}
+        result = {}
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                raise RecordSyntaxError(f"{source}:{node.lineno}: dictionary keys must be strings")
+            if key.value in result:
+                raise RecordSyntaxError(f"{source}:{node.lineno}: duplicate dictionary key")
+            result[key.value] = _convert(value, source)
+        return result
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
         operand = _convert(node.operand, source)
         if isinstance(operand, bool) or not isinstance(operand, int):
@@ -691,6 +729,14 @@ def validate_config(config: Any) -> dict[str, Any]:
 def load_config(root: Path) -> tuple[dict[str, Any], int]:
     path = root / "config.json"
     if not path.is_file():
+        index = root / "index.md"
+        if index.is_file():
+            try:
+                calls = parse_markdown(index.read_text(encoding="utf-8"), str(index))
+            except RecordSyntaxError:
+                calls = []  # The validator reports the original syntax error.
+            if any(call.name == "ActiveMemoryIndex" for call in calls):
+                raise ConfigError("missing config.json for ActiveMemoryIndex (incomplete v3 root)")
         legacy = json.loads(json.dumps(DEFAULT_CONFIG))
         legacy["schema_version"] = 2
         return legacy, 2
@@ -705,12 +751,21 @@ def config_json() -> str:
     return json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
 
 
-def count_tokens(text: str, encoding: str = "o200k_base", require_exact: bool = False) -> TokenMeasurement:
+@lru_cache(maxsize=1)
+def _tokenizer(encoding: str):
     try:
-        import tiktoken  # type: ignore[import-not-found]
-    except ImportError as exc:
+        import tiktoken
+        return tiktoken.get_encoding(encoding)
+    except (ImportError, OSError, ValueError):
+        # The package may be installed while its encoding data is unavailable.
+        return None
+
+
+def count_tokens(text: str, encoding: str = "o200k_base", require_exact: bool = False) -> TokenMeasurement:
+    tokenizer = _tokenizer(encoding)
+    if tokenizer is None:
         if require_exact:
-            raise TokenizerUnavailable("tiktoken is required for exact o200k_base counting") from exc
+            raise TokenizerUnavailable(f"tiktoken and cached {encoding} data are required for exact counting")
         utf8_estimate = math.ceil(len(text.encode("utf-8")) / 3)
         char_estimate = math.ceil(len(text) / 3)
         return TokenMeasurement(
@@ -719,9 +774,8 @@ def count_tokens(text: str, encoding: str = "o200k_base", require_exact: bool = 
             exact=False,
             method="max_utf8_bytes_or_chars_div_3",
         )
-    tokenizer = tiktoken.get_encoding(encoding)
     return TokenMeasurement(
-        tokens=len(tokenizer.encode(text)),
+        tokens=len(tokenizer.encode_ordinary(text)),
         encoding=encoding,
         exact=True,
         method="tiktoken",
