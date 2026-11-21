@@ -68,3 +68,11 @@ jobs:
           --repo-root .
           --history-sizes 100 300 1000
           --output "${{ runner.temp }}/deterministic-result.json"
+
+      - name: Publish aggregate evaluation evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/deterministic-result.json"; then
+            python evals/gate_summary.py "$RUNNER_TEMP/deterministic-result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi

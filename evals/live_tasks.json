@@ -14,8 +14,9 @@
     },
     {
       "id": "resume-index-rebuild",
+      "history_size": 1000,
       "category": "resume",
-      "query": "Continue the interrupted search-index rebuild from its verified checkpoint.",
+      "query": "検索インデックスの再構築を中断した地点から再開します。検証済みの次の操作は何ですか？",
       "records": [
         {"path": "handoffs/HANDOFF-INDEX.md", "anchor": "search-index-rebuild", "kind": "handoff", "relevance": "required", "body": "HandoffCheckpoint(status=\"ready\", fact=\"resume_fact_index_shard_12_verified\", completed=[\"shards 1 through 12\"], remaining=[\"shard 13\"], next_action=\"rebuild_index_shard_13\")"},
         {"path": "tasks/TASK-EMAIL.md", "anchor": "email-template", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"email_copy_approved\", next_action=\"publish_email_template\")"},
@@ -47,10 +48,12 @@
     },
     {
       "id": "decision-sqlite-wal",
+      "history_size": 300,
       "category": "decision_fact",
       "query": "What storage journal decision was accepted for the local event database?",
       "records": [
         {"path": "decisions/DEC-SQLITE.md", "anchor": "sqlite-journal", "kind": "decision", "relevance": "required", "body": "Decision(status=\"accepted\", fact=\"fact_sqlite_readers_need_nonblocking_writes\", decision=\"use_sqlite_wal_mode\")"},
+        {"path": "decisions/DEC-SQLITE-OLD.md", "anchor": "sqlite-journal", "kind": "decision", "index_status": "deprecated", "relevance": "irrelevant", "body": "Decision(fact=\"fact_previous_journal_mode\", decision=\"use_delete_journal_mode\")"},
         {"path": "issues/ISSUE-CSV.md", "anchor": "csv-export", "kind": "issue", "relevance": "irrelevant", "body": "Issue(fact=\"csv_header_order_open\", status=\"open\")"},
         {"path": "tasks/TASK-ICON.md", "anchor": "app-icon", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"icon_size_512\", next_action=\"render_icon\")"}
       ],
@@ -179,8 +182,9 @@
     },
     {
       "id": "abstain-deploy-date",
+      "locked": true,
       "category": "abstention_irrelevant",
-      "query": "What exact production deployment date was approved? Abstain if memory has no authoritative fact.",
+      "query": "Is there a committed, verified date for the production deployment at this boundary?",
       "records": [
         {"path": "tasks/TASK-CALENDAR.md", "anchor": "calendar-widget", "kind": "task", "relevance": "irrelevant", "body": "Task(fact=\"calendar_week_starts_monday\", next_action=\"test_calendar\")"},
         {"path": "decisions/DEC-TIMEZONE.md", "anchor": "display-timezone", "kind": "decision", "relevance": "irrelevant", "body": "Decision(fact=\"display_timezone_utc\", decision=\"show_utc\")"},

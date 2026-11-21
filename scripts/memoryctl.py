@@ -17,12 +17,14 @@ from memory_transaction import (
     OPERATIONS,
     TransactionError,
     abort_transaction,
+    add_transaction_files,
     begin_transaction,
     commit_transaction,
     migrate_v2_to_v3,
     recover_transaction,
 )
 from memory_validation import budget_report, validate_memory
+from memory_writes import init_memory, put_record
 
 
 def _print_json(value: Any) -> None:
@@ -68,6 +70,7 @@ def _recall_command(args: argparse.Namespace) -> int:
             args.memory_root,
             args.query,
             kinds=kinds,
+            status=args.status,
             top=args.expand_to if args.expand_to is not None else args.top,
             expand=args.expand if args.expand_to is None else False,
         )
@@ -79,6 +82,7 @@ def _recall_command(args: argparse.Namespace) -> int:
     else:
         print(f"snapshot: {result['snapshot_id'] or 'unknown'}")
         print(f"query: {result['query']}")
+        print(f"coverage: {result['coverage']}")
         if result["selected_routes"]:
             print("routes: " + ", ".join(result["selected_routes"]))
         if not result["candidates"]:
@@ -87,7 +91,7 @@ def _recall_command(args: argparse.Namespace) -> int:
             terms = ", ".join(candidate["matched_terms"]) or "exact phrase"
             print(
                 f"{index}. {candidate['path']} "
-                f"(score={candidate['score']}, kind={candidate['kind']}, matches={terms})"
+                f"(score={candidate['score']}, kind={candidate['kind']}, status={candidate['status']}, matches={terms})"
             )
         for warning in result["warnings"]:
             print(f"warning: {warning}", file=sys.stderr)
@@ -102,7 +106,7 @@ def _budget_command(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     result["memory_root"] = str(args.memory_root.resolve())
-    blocked = result["schema_version"] == 3 and any(item["over_hard"] for item in result["items"])
+    blocked = result["schema_version"] == 3 and any(item["exact"] and item["over_hard"] for item in result["items"])
     result["ok"] = not blocked
     if args.json:
         _print_json(result)
@@ -111,6 +115,8 @@ def _budget_command(args: argparse.Namespace) -> int:
         for item in result["items"]:
             precision = "exact" if item["exact"] else f"estimated:{item['method']}"
             state = "HARD" if item["over_hard"] else "target" if item["over_target"] else "ok"
+            if item["over_hard"] and not item["exact"]:
+                state = "estimated overrun (warning)"
             print(
                 f"{item['path']}: {item['tokens']} tokens ({precision}), "
                 f"target={item['target']} hard={item['hard']} [{state}]"
@@ -186,6 +192,21 @@ def _migrate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _init_command(args: argparse.Namespace) -> int:
+    _print_json(init_memory(args.memory_root, args.name, args.purpose))
+    return 0
+
+
+def _put_command(args: argparse.Namespace) -> int:
+    _print_json(put_record(args.memory_root, args.source, path=args.path, mode=args.mode, summary=args.summary))
+    return 0
+
+
+def _txn_add(args: argparse.Namespace) -> int:
+    _print_json(add_transaction_files(args.memory_root, args.patch_id, args.file, args.delete_file))
+    return 0
+
+
 def _txn_begin(args: argparse.Namespace) -> int:
     try:
         result = begin_transaction(
@@ -249,6 +270,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    init = subparsers.add_parser("init", help="Initialize a new or empty v3 root")
+    init.add_argument("memory_root", type=Path)
+    init.add_argument("--name")
+    init.add_argument("--purpose")
+    init.set_defaults(handler=_init_command)
+
+    record = subparsers.add_parser("record", help="Commit an authored canonical record")
+    put = record.add_subparsers(dest="action", required=True).add_parser("put")
+    put.add_argument("memory_root", type=Path)
+    put.add_argument("source", type=Path, help="Markdown containing one structured record")
+    put.add_argument("--path", help="Canonical destination, default KIND/ID.md")
+    put.add_argument("--mode", choices=MODES)
+    put.add_argument("--summary", help="Short index summary")
+    put.set_defaults(handler=_put_command)
+
     validate = subparsers.add_parser("validate", help="Validate one memory root")
     validate.add_argument("memory_root", type=Path)
     validate.add_argument("--catalog", type=Path)
@@ -263,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     recall_parser.add_argument("memory_root", type=Path)
     recall_parser.add_argument("--query", required=True)
     recall_parser.add_argument("--kinds", default=",".join(DEFAULT_KINDS))
+    recall_parser.add_argument("--status", help="Match canonical or index status")
     recall_parser.add_argument("--top", type=int)
     recall_parser.add_argument("--expand", action="store_true", help="Use configured expanded top-k")
     recall_parser.add_argument("--expand-to", type=int, help="Explicit expanded result limit, normally 8")
@@ -299,11 +336,19 @@ def build_parser() -> argparse.ArgumentParser:
     begin.add_argument("--patch-id", required=True)
     begin.add_argument("--mode", choices=MODES, default="standard")
     begin.add_argument("--operation", choices=OPERATIONS, default="update")
-    begin.add_argument("--target-snapshot", required=True)
+    target = begin.add_mutually_exclusive_group(required=True)
+    target.add_argument("--target-snapshot")
+    target.add_argument("--auto-target", action="store_true", help="Generate the next UTC snapshot")
     begin.add_argument("--file", action="append", required=True)
     begin.add_argument("--delete-file", action="append", default=[])
     begin.add_argument("--owner", default="memoryctl")
     begin.set_defaults(handler=_txn_begin)
+    add = txn_sub.add_parser("add", help="Add paths to a prepared transaction")
+    add.add_argument("memory_root", type=Path)
+    add.add_argument("--patch-id", required=True)
+    add.add_argument("--file", action="append", default=[])
+    add.add_argument("--delete-file", action="append", default=[])
+    add.set_defaults(handler=_txn_add)
     commit = txn_sub.add_parser("commit")
     commit.add_argument("memory_root", type=Path)
     commit.add_argument("--patch-id", required=True)
@@ -323,7 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except (TransactionError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from evals.read_trace import observed_files
 from evals.contracts import (  # noqa: E402
     ABSOLUTE_GATES,
     CORRECTNESS_METRICS,
@@ -72,6 +73,7 @@ EXPLICIT_RUNNER_FAILURE_CODES = {
 }
 INFRASTRUCTURE_FAILURE_CODES = EXPLICIT_RUNNER_FAILURE_CODES | {
     "runner_timeout",
+    "unmeasured_read_trace",
     "runner_protocol_failure",
 }
 
@@ -273,6 +275,7 @@ def collect_preflight(
     output_schema: Path,
     model: str | None,
     runner_sandbox: str,
+    no_skill_control: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]] | None, Any | None]:
     failures: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] | None = None
@@ -363,7 +366,7 @@ def collect_preflight(
     try:
         tasks = load_tasks(tasks_path)
         resolved["task_count"] = len(tasks)
-        resolved["total_runs"] = len(tasks) * repetitions * 2
+        resolved["total_runs"] = len(tasks) * repetitions * (3 if no_skill_control else 2)
     except ContractError as exc:
         failures.append(exc.as_dict())
     try:
@@ -428,7 +431,7 @@ def collect_preflight(
                     runtime_root = temporary_root / f"runtime-{arm}"
                     project_root = temporary_root / f"project-{arm}"
                     materialize_runtime(repo_root, resolved[f"{arm}_source"], runtime_root)
-                    build_project_fixture(project_root, tasks[0], arm)
+                    build_project_fixture(project_root, tasks[0], arm, runtime_root)
                     validate_project_fixture(runtime_root, project_root, arm)
                     validated_arms.append(arm)
                 resolved["fixture_validation"] = validated_arms
@@ -655,11 +658,17 @@ IMPORTANCE_BY_KIND = {
 }
 
 
-def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str) -> None:
+def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str, runtime_root: Path | None = None) -> None:
     memory = project_root / "memory"
-    digest = hashlib.sha256(str(task["id"]).encode("utf-8")).hexdigest()[:12].upper()
-    snapshot = f"SNAP-EVAL-{digest}"
-    records = task["records"]
+    snapshot = "SNAP-20260830-000000"
+    records = list(task["records"])
+    for n in range(task.get("history_size", 0)):
+        records.append({
+            "path": f"tasks/TASK-HISTORY-{n:04}.md",
+            "anchor": f"maintenance-{n % 12:02}",
+            "kind": "task", "relevance": "irrelevant", "history": True,
+            "body": f'Task(fact="maintenance_completed_{n:04}")',
+        })
     entries: list[str] = []
     anchors: list[str] = []
     for record in records:
@@ -670,6 +679,14 @@ def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str)
         anchor = f"concept:{record['anchor']}"
         anchors.append(anchor)
         record_name, record_fields = _record_fields(record, task, snapshot, arm)
+        status = record.get("index_status", "active")
+        if record.get("history"):
+            record_fields["status"] = "archived"
+            status = "archived"
+        elif status == "deprecated":
+            record_fields["status"] = "deprecated"
+        elif status == "scratch" and record_name == "Lesson":
+            record_fields["status"] = "candidate"
         _write_text(memory / PurePosixPath(relative), _structured_record(record_name, record_fields))
         summary = f"{record['kind']} record for {record['anchor']}"
         entries.append(
@@ -678,7 +695,7 @@ def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str)
             f"summary={_python_literal(summary)}, "
             f"path={_python_literal(relative)}, "
             f"importance={_python_literal(IMPORTANCE_BY_KIND[str(record['kind'])])}, "
-            'status="active", related=[], '
+            f'status="{status}", related=[], '
             f'record_snapshot_id="{snapshot}"),'
         )
 
@@ -692,14 +709,14 @@ def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str)
                 "record_mode": "standard",
                 "active_goal": str(task["query"]),
                 "invariants": ["Use only authoritative records and preserve missing facts as absent"],
-                "active_decisions": [anchor for anchor, record in zip(anchors, records) if record["kind"] == "decision"],
-                "active_lessons": [anchor for anchor, record in zip(anchors, records) if record["kind"] == "lesson"],
-                "open_issues": [anchor for anchor, record in zip(anchors, records) if record["kind"] == "issue"],
-                "unresolved_conflicts": [anchor for anchor, record in zip(anchors, records) if record["kind"] == "conflict"],
-                "active_tasks": [anchor for anchor, record in zip(anchors, records) if record["kind"] == "task"],
-                "latest_handoff": next((anchor for anchor, record in zip(anchors, records) if record["kind"] == "handoff"), None),
+                "active_decisions": [f"decision:{Path(record['path']).stem}" for record in records if record["kind"] == "decision" and record.get("index_status", "active") == "active"],
+                "active_lessons": [f"lesson:{Path(record['path']).stem}" for record in records if record["kind"] == "lesson" and record.get("index_status", "active") == "active"],
+                "open_issues": [f"issue:{Path(record['path']).stem}" for record in records if record["kind"] == "issue"],
+                "unresolved_conflicts": [f"conflict:{Path(record['path']).stem}" for record in records if record["kind"] == "conflict"],
+                "active_tasks": [f"task:{Path(record['path']).stem}" for record in records if record["kind"] == "task" and not record.get("history")],
+                "latest_handoff": next((f"handoff:{Path(record['path']).stem}" for record in records if record["kind"] == "handoff"), None),
                 "pending_patches": [],
-                "next_actions": ["Retrieve only records relevant to the query"],
+                "next_actions": [],
                 "last_updated": "2026-08-30T00:00:00+09:00",
             },
         ),
@@ -719,9 +736,7 @@ def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str)
                 "entry_points": ["memory/current.md", "memory/index.md"],
                 "authoritative_sources": ["memory detail records"],
                 "generated_or_disposable": [],
-                "navigation_notes": [
-                    "Open ranked detail candidates one at a time and stop when sufficient"
-                ],
+                "navigation_notes": [],
             },
         ),
     )
@@ -739,76 +754,24 @@ def build_project_fixture(project_root: Path, task: Mapping[str, Any], arm: str)
         (memory / directory).mkdir(parents=True, exist_ok=True)
     _write_text(memory / "archive" / "manifest.md", _structured_record("ArchiveManifest", {"entries": []}))
 
-    if arm == "v2":
-        _write_text(
-            memory / "index.md",
-            "```python\n"
-            + "\n".join(
-                ["MemoryIndex(", f'    snapshot_id="{snapshot}",', "    entries=[", *entries, "    ],", ")"]
-            )
-            + "\n```",
+    _write_text(
+        memory / "index.md",
+        "```python\n"
+        + "\n".join(
+            ["MemoryIndex(", f'    snapshot_id="{snapshot}",', "    entries=[", *entries, "    ],", ")"]
         )
-    elif arm == "v3":
-        _write_text(
-            memory / "config.json",
-            json.dumps(
-                {
-                    "schema_version": 3,
-                    "record_mode": "standard",
-                    "budgets": {
-                        "current": {"target": 450, "hard": 600},
-                        "root_index": {"target": 1500, "hard": 2000},
-                        "topic_index": {"target": 1500, "hard": 2000},
-                    },
-                    "tokenizer": {
-                        "encoding": TOKENIZER_NAME,
-                        "fallback": "max_utf8_bytes_or_chars_div_3",
-                    },
-                    "retrieval": {"normal_top_k": 3, "expanded_top_k": 8},
-                },
-                indent=2,
-                sort_keys=True,
-            ),
+        + "\n```",
+    )
+    if arm == "v3":
+        runtime = (runtime_root or Path(__file__).resolve().parents[1]) / "scripts/memoryctl.py"
+        result = subprocess.run(
+            [sys.executable, str(runtime), "migrate", str(memory), "--target-snapshot", "SNAP-20260830-000100",
+             "--apply", "--confirm", "APPLY_V3_MIGRATION"], capture_output=True, text=True,
         )
-        _write_text(
-            memory / "indexes" / "eval-topic.md",
-            "```python\n"
-            + "\n".join(
-                [
-                    "TopicIndex(",
-                    '    topic_id="eval-topic",',
-                    f'    snapshot_id="{snapshot}",',
-                    f"    anchors={_python_literal(anchors)},",
-                    "    entries=[",
-                    *entries,
-                    "    ],",
-                    '    archive_route="archive/manifest.md",',
-                    ")",
-                ]
-            )
-            + "\n```",
-        )
-        _write_text(
-            memory / "index.md",
-            "```python\n"
-            + "\n".join(
-                [
-                    "ActiveMemoryIndex(",
-                    f'    snapshot_id="{snapshot}",',
-                    "    entries=[],",
-                    "    routes=[",
-                    "        IndexRoute("
-                    f"route_id=\"eval-topic\", anchor_prefixes={_python_literal(anchors)}, "
-                    'path_glob="indexes/eval-topic.md", summary="Task-scoped active records", '
-                    'status_scope=["active"]),',
-                    "    ],",
-                    ")",
-                ]
-            )
-            + "\n```",
-        )
-    else:
-        raise ValueError(f"Unknown arm: {arm}")
+        if result.returncode:
+            raise ContractError("fixture_validation_failed", "fixture migration failed", stderr=result.stderr[-2000:])
+    if task.get("locked"):
+        _write_text(memory / ".update-lock", json.dumps({"patch_id": "PATCH-interrupted"}))
 
 
 def validate_project_fixture(runtime_root: Path, project_root: Path, arm: str) -> None:
@@ -896,18 +859,13 @@ def _assert_workspace_unchanged(before: Mapping[str, str], workspace: Path) -> N
         )
 
 
-def build_prompt(task: Mapping[str, Any]) -> str:
-    return f"""Controlled manage-layered-context paired evaluation.
-
-Read and follow skill/SKILL.md as the only skill version for this run. The local skill root is exactly `skill/`: report the entrypoint as `skill/SKILL.md` and references as `skill/references/...`; never insert `manage-layered-context/` after `skill/`. Project memory paths begin exactly with `project/memory/`. Read only the local skill references it routes to and the project memory files needed for the query. Do not use a globally installed manage-layered-context skill. Do not edit files.
+def build_prompt(task: Mapping[str, Any], *, no_skill: bool = False) -> str:
+    skill = "" if no_skill else "Use the local skill/SKILL.md. "
+    return f"""{skill}Project memory is in project/memory/. Do not edit files.
 
 Query: {task['query']}
 
-Return only the JSON required by the supplied schema. task_id must be {task['id']}. loaded_files must list every skill protocol file and project memory file actually read, using workspace-relative paths beginning with skill/ or project/memory/.
-
-Treat top 3 as a candidate upper bound, never a batch-read instruction. Rank candidates, open rank 1, assess whether the query and required evidence are covered, and stop immediately when sufficient. Open ranks 2 and 3 one at a time only for a named remaining gap. recalled_records lists only canonical detail records actually opened, in open order, and must contain at most three workspace-relative paths.
-
-Before returning JSON, verify the provenance invariant recalled_records ⊆ loaded_files. Every path in recalled_records must also appear verbatim in loaded_files; if a canonical record was not actually opened, remove it from recalled_records instead of claiming it.
+Return the supplied JSON schema with task_id={task['id']}. Use workspace-relative paths. loaded_files lists files actually read. recalled_records lists the first three distinct canonical records actually read, in order.
 
 Copy exact stable identifiers only: fact_ids contains exact fact identifiers; decision_id contains only the exact Decision.choice identifier, never a fact identifier; contradiction_id contains only the exact first-class contradiction identifier, never explanatory prose; next_action_id contains only the exact next-action or required-check identifier. Put human-readable explanation in answer. Set contradiction_detected=true exactly when authoritative loaded records expose an unresolved contradiction. Do not infer a missing identifier. If the query cannot be answered from authoritative memory, set abstained=true, fact_ids=[], decision_id=null, contradiction_detected=false, contradiction_id=null, and next_action_id=null."""
 
@@ -923,9 +881,10 @@ def classify_infrastructure_failure(message: str) -> str:
     return "runner_failure"
 
 
-def parse_codex_events(text: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+def parse_codex_events(text: str) -> tuple[Mapping[str, Any], dict[str, int], list[dict]]:
     final_message: str | None = None
-    usage: Mapping[str, Any] | None = None
+    usage: Counter[str] = Counter()
+    commands = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -946,13 +905,17 @@ def parse_codex_events(text: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]
             raise ContractError(classify_infrastructure_failure(message), message)
         if event.get("type") == "item.completed":
             item = event.get("item")
+            if isinstance(item, dict) and item.get("type") in {"command_execution", "mcp_tool_call"}:
+                commands.append({k: item[k] for k in ("command", "cwd", "exit_code") if k in item})
             if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                 final_message = item["text"]
         if event.get("type") == "turn.completed":
             candidate_usage = event.get("usage")
             if isinstance(candidate_usage, dict):
-                usage = candidate_usage
-    if usage is None:
+                if type(candidate_usage.get("input_tokens")) is not int or candidate_usage["input_tokens"] <= 0:
+                    raise ContractError("runner_protocol_failure", "Missing or invalid actual input token usage")
+                usage.update({k: v for k, v in candidate_usage.items() if type(v) is int})
+    if not usage:
         raise ContractError("runner_protocol_failure", "Codex JSONL has no turn.completed.usage object")
     if final_message is None:
         raise ContractError("agent_output_failure", "Codex JSONL has no completed agent message")
@@ -966,7 +929,7 @@ def parse_codex_events(text: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]
         ) from exc
     if not isinstance(output, dict):
         raise ContractError("agent_output_failure", "Final agent output must be a JSON object")
-    return output, usage
+    return output, dict(usage), commands
 
 
 def validate_agent_output(output: Mapping[str, Any], task_id: str) -> dict[str, Any]:
@@ -981,6 +944,7 @@ def validate_agent_output(output: Mapping[str, Any], task_id: str) -> dict[str, 
         "next_action_id",
         "resume_success",
         "abstained",
+        "unstable_boundary",
         "answer",
     }
     if set(output) != required_fields:
@@ -1012,7 +976,7 @@ def validate_agent_output(output: Mapping[str, Any], task_id: str) -> dict[str, 
             raise ContractError("agent_output_failure", f"agent_output.{field} must be a string or null")
         if isinstance(output[field], str) and not output[field].strip():
             raise ContractError("agent_output_failure", f"agent_output.{field} must not be blank")
-    for field in ("contradiction_detected", "resume_success", "abstained"):
+    for field in ("contradiction_detected", "resume_success", "abstained", "unstable_boundary"):
         require_bool(output, field, "agent_output")
     if not isinstance(output["answer"], str):
         raise ContractError("agent_output_failure", "agent_output.answer must be a string")
@@ -1040,11 +1004,17 @@ def score_output(
     output: Mapping[str, Any],
     workspace: Path,
     encoding: Any,
+    observed: list[str],
 ) -> dict[str, Any]:
     expected = task["expected"]
     required_records = set(expected["required_records"])
     required_facts = set(expected["required_facts"])
-    recalled = output["recalled_records"][:3]
+    detail_dirs = {"tasks", "decisions", "issues", "conflicts", "lessons", "archive", "handoffs"}
+    actual_records = [
+        p for p in observed if p.startswith("project/memory/") and len(Path(p).parts) >= 4
+        and Path(p).parts[2] in detail_dirs and not Path(p).name.startswith("_") and p != "project/memory/archive/manifest.md"
+    ]
+    recalled = actual_records[:3]
     recalled_set = set(recalled)
     fact_ids = set(output["fact_ids"])
     record_recall_score = (
@@ -1094,17 +1064,16 @@ def score_output(
 
     overhead_tokens, normalized_loaded = exact_loaded_file_tokens(
         workspace,
-        output["loaded_files"],
+        observed,
         encoding,
     )
-    irrelevant_records = {
-        f"project/memory/{record['path']}"
-        for record in task["records"]
-        if record["relevance"] == "irrelevant"
-    }
-    irrelevant_loaded = sorted(irrelevant_records & set(normalized_loaded))
+    irrelevant_loaded = sorted(set(actual_records) - required_records)
     return {
+        "observed_files": normalized_loaded,
+        "unreported_reads": sorted(set(observed) - set(output["loaded_files"])),
+        "unobserved_claims": sorted(set(output["loaded_files"]) - set(observed)),
         "scores": {
+            "unstable_boundary_detected": output["unstable_boundary"] if task.get("locked") else None,
             "resume_success": resume_score,
             "required_record_recall_at_3": record_recall_score,
             "required_fact_extraction": fact_extraction_score,
@@ -1124,7 +1093,7 @@ def score_output(
 def run_codex(
     command: Sequence[str],
     timeout_seconds: int,
-) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+) -> tuple[Mapping[str, Any], dict[str, int], list[dict]]:
     runner_environment = dict(os.environ)
     runner_environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
@@ -1181,13 +1150,14 @@ def _run_one(
 ) -> dict[str, Any]:
     run_id = f"{arm}-{task['id']}-{repetition:02d}"
     workspace = run_root / run_id
-    shutil.copytree(skill_base, workspace / "skill")
-    build_project_fixture(workspace / "project", task, arm)
+    if arm != "no_skill":
+        shutil.copytree(skill_base, workspace / "skill")
+    build_project_fixture(workspace / "project", task, "v3" if arm == "no_skill" else arm, skill_base)
     command = build_codex_command(
         codex_binary,
         workspace,
         output_schema,
-        build_prompt(task),
+        build_prompt(task, no_skill=arm == "no_skill"),
         model,
         runner_sandbox,
     )
@@ -1195,12 +1165,15 @@ def _run_one(
     started = time.perf_counter()
     try:
         try:
-            raw_output, usage = run_codex(command, timeout_seconds)
+            raw_output, usage, commands = run_codex(command, timeout_seconds)
         finally:
             _assert_workspace_unchanged(before, workspace)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         output = validate_agent_output(raw_output, str(task["id"]))
-        score = score_output(task, output, workspace, encoding)
+        observed = observed_files(commands, workspace)
+        if not commands and output["loaded_files"]:
+            raise ContractError("unmeasured_read_trace", "Declared reads without command events")
+        score = score_output(task, output, workspace, encoding, observed)
         return {
             "run_id": run_id,
             "arm": arm,
@@ -1262,6 +1235,8 @@ def aggregate_arm(
         for key, value in run["usage"].items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 usage_totals[key] = usage_totals.get(key, 0) + value
+    inputs = [run["usage"]["input_tokens"] for run in scored]
+    metrics["input_tokens"] = {"count": len(inputs), "p50": nearest_rank(inputs, 0.50) if inputs else None}
     metrics["memory_overhead_tokens"] = {
         "count": len(overhead),
         "p50": nearest_rank(overhead, 0.50) if overhead else None,
@@ -1271,6 +1246,7 @@ def aggregate_arm(
         "count": len(irrelevant),
         "total": sum(irrelevant),
         "mean_per_run": (sum(irrelevant) / len(irrelevant)) if irrelevant else None,
+        "max_per_run": max(irrelevant) if irrelevant else None,
     }
     metrics["latency_ms"] = {
         "count": len(latencies),
@@ -1324,11 +1300,15 @@ def evaluate_gates(
         actual = v3["metrics"][metric]["rate"]
         add(f"v3_{metric}", actual, ">=", threshold, actual is not None and actual >= threshold)
 
+    v2_input = v2["metrics"]["input_tokens"]["p50"]
+    v3_input = v3["metrics"]["input_tokens"]["p50"]
+    add("v3_input_tokens_p50_vs_v2", v3_input, "<=", v2_input,
+        v2_input is not None and v3_input is not None and v3_input <= v2_input)
     v3_overhead = v3["metrics"]["memory_overhead_tokens"]
     add("v3_memory_overhead_p50", v3_overhead["p50"], "<=", 4000, v3_overhead["p50"] is not None and v3_overhead["p50"] <= 4000)
     add("v3_memory_overhead_p95", v3_overhead["p95"], "<=", 8000, v3_overhead["p95"] is not None and v3_overhead["p95"] <= 8000)
-    irrelevant_mean = v3["metrics"]["irrelevant_record_load"]["mean_per_run"]
-    add("v3_irrelevant_records_per_run", irrelevant_mean, "<=", 1.0, irrelevant_mean is not None and irrelevant_mean <= 1.0)
+    irrelevant_max = v3["metrics"]["irrelevant_record_load"]["max_per_run"]
+    add("v3_irrelevant_records_per_run", irrelevant_max, "<=", 1, irrelevant_max is not None and irrelevant_max <= 1)
 
     for metric in CORRECTNESS_METRICS:
         v2_rate = v2["metrics"][metric]["rate"]
@@ -1357,9 +1337,10 @@ def evaluate_gates(
 def _expected_jobs(
     tasks: Sequence[Mapping[str, Any]],
     repetitions: int,
+    arms: Sequence[str] = ("v2", "v3"),
 ) -> dict[str, tuple[str, Mapping[str, Any], int]]:
     jobs: dict[str, tuple[str, Mapping[str, Any], int]] = {}
-    for arm in ("v2", "v3"):
+    for arm in arms:
         for task in tasks:
             for repetition in range(1, repetitions + 1):
                 run_id = f"{arm}-{task['id']}-{repetition:02d}"
@@ -1388,7 +1369,7 @@ def load_resume_runs(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not path.is_file():
         raise ContractError("resume_source_missing", f"Resume JSONL does not exist: {path}")
-    expected_jobs = _expected_jobs(tasks, repetitions)
+    expected_jobs = _expected_jobs(tasks, repetitions, tuple(runtime_ids))
     records: dict[str, dict[str, Any]] = {}
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
@@ -1452,6 +1433,8 @@ def load_resume_runs(
                     )
                 if not isinstance(raw.get("scores"), dict):
                     raise ContractError("resume_source_invalid", f"Scored run has no scores object: {run_id}")
+                if not isinstance(raw.get("observed_files"), list) or type(raw["usage"].get("input_tokens")) is not int:
+                    raise ContractError("resume_source_invalid", "Older runs without observed reads and input usage cannot be reused")
                 overhead = raw.get("memory_overhead_tokens")
                 irrelevant = raw.get("irrelevant_record_load")
                 latency = raw.get("latency_ms")
@@ -1500,10 +1483,11 @@ def _revalidate_reused_run(
     encoding: Any,
 ) -> None:
     workspace = run_root / f"reused-{run['run_id']}"
-    shutil.copytree(skill_base, workspace / "skill")
-    build_project_fixture(workspace / "project", task, str(run["arm"]))
+    if run["arm"] != "no_skill":
+        shutil.copytree(skill_base, workspace / "skill")
+    build_project_fixture(workspace / "project", task, "v3" if run["arm"] == "no_skill" else str(run["arm"]), skill_base)
     output = validate_agent_output(run["agent_output"], str(task["id"]))
-    rescored = score_output(task, output, workspace, encoding)
+    rescored = score_output(task, output, workspace, encoding, run["observed_files"])
     if run["agent_output"] != output or any(run.get(field) != value for field, value in rescored.items()):
         raise ContractError(
             "resume_score_mismatch",
@@ -1554,8 +1538,9 @@ def run_paired_evaluation(
         }
         materialize_runtime(repo_root, sources["v2"], skill_bases["v2"])
         materialize_runtime(repo_root, sources["v3"], skill_bases["v3"])
+        skill_bases["no_skill"] = skill_bases["v3"]
         run_root = temporary_root / "runs"
-        expected_jobs = _expected_jobs(tasks, repetitions)
+        expected_jobs = _expected_jobs(tasks, repetitions, tuple(runtime_ids))
         reused_run_ids = {str(run["run_id"]) for run in reusable_runs}
         jobs = [job for run_id, job in expected_jobs.items() if run_id not in reused_run_ids]
         task_categories = {str(task["id"]): str(task["category"]) for task in tasks}
@@ -1627,7 +1612,7 @@ def run_paired_evaluation(
                     os.fsync(run_log.fileno())
 
     task_order = {task["id"]: index for index, task in enumerate(tasks)}
-    arm_order = {"v2": 0, "v3": 1}
+    arm_order = {"v2": 0, "v3": 1, "no_skill": 2}
     results.sort(key=lambda run: (arm_order[run["arm"]], task_order[run["task_id"]], run["repetition"]))
     infrastructure_failures = [
         run for run in results if run.get("failure_class") == "infrastructure"
@@ -1642,7 +1627,7 @@ def run_paired_evaluation(
             category: aggregate_arm(results, arm, category)
             for category in sorted(EXPECTED_CATEGORIES)
         }
-        for arm in ("v2", "v3")
+        for arm in runtime_ids
     }
     gates = evaluate_gates(v2_metrics, v3_metrics, infrastructure_failures, evaluation_failures)
     passed = all(gate["passed"] for gate in gates)
@@ -1678,7 +1663,7 @@ def run_paired_evaluation(
             "ignore_user_config": True,
             "python_bytecode_disabled": True,
         },
-        "arms": {"v2": v2_metrics, "v3": v3_metrics},
+        "arms": {arm: aggregate_arm(results, arm) for arm in runtime_ids},
         "categories": category_metrics,
         "gates": gates,
         "infrastructure_failure_count": len(infrastructure_failures),
@@ -1702,6 +1687,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=WORKTREE_REF,
         help="Git ref for v3, or WORKTREE to evaluate the uncommitted release candidate.",
     )
+    parser.add_argument("--no-skill-control", action="store_true", help="Add a control arm with v3 memory and no skill")
     parser.add_argument("--tasks", type=Path, default=repo_root / "evals" / "live_tasks.json")
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
@@ -1757,6 +1743,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_schema,
         args.model,
         args.runner_sandbox,
+        args.no_skill_control,
     )
     if args.timeout_seconds <= 0:
         failures.append({"code": "invalid_timeout", "message": "timeout-seconds must be positive"})
@@ -1807,6 +1794,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources = {"v2": preflight["v2_source"], "v3": preflight["v3_source"]}
     runtime_ids = {"v2": preflight["v2_runtime_id"], "v3": preflight["v3_runtime_id"]}
     commit_shas = {"v2": preflight["v2_commit"], "v3": preflight["v3_commit"]}
+    if args.no_skill_control:
+        runtime_ids["no_skill"] = "no-skill:" + runtime_ids["v3"]
+        commit_shas["no_skill"] = commit_shas["v3"]
     jsonl_output = args.jsonl_output
     if jsonl_output is None and args.output is not None:
         jsonl_output = args.output.with_suffix(".runs.jsonl")

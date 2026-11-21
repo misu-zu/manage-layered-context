@@ -32,7 +32,7 @@ HandoffCheckpoint(
 )
 ```
 
-Full adds context ID, actor/receiver, creation time, task-base/source/created/last-updated snapshots, predecessor, acceptance criteria, artifacts/deletions, assumptions, risks, anchors, lessons/checks, pending patches, sources, and consumption provenance. Inspect the exact conditional schema with `memoryctl.py schema HandoffCheckpoint --json` and use `assets/memory-template/handoffs/_full_template.md`.
+Full adds context ID, actor/receiver, creation time, task-base/source/created/last-updated snapshots, predecessor, acceptance criteria, artifacts/deletions, assumptions, risks, anchors, lessons/checks, pending patches, sources, and consumption provenance. Inspect the exact conditional schema with `memoryctl.py schema HandoffCheckpoint --json` and use `assets/memory-template/handoffs/_template.md`.
 
 ## When to create
 

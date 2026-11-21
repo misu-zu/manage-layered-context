@@ -1,0 +1,5 @@
+.staging/
+.update-lock
+.transactions/
+.memoryctl-*.tmp
+.txn-guard

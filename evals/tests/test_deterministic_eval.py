@@ -40,7 +40,7 @@ class DeterministicFixtureTests(unittest.TestCase):
                     self.assertEqual(task_count, inspection["reachable_detail_count"])
                     self.assertTrue(inspection["all_details_reachable"])
 
-    def test_contract_fake_produces_perfect_recall_and_exact_budgets(self) -> None:
+    def test_contract_fake_missing_semantic_matches_fails_gate(self) -> None:
         result = run_evaluation(
             REPO_ROOT,
             FAKE_MEMORYCTL,
@@ -49,8 +49,8 @@ class DeterministicFixtureTests(unittest.TestCase):
             5,
             self.encoding,
         )
-        self.assertEqual("passed", result["status"])
-        self.assertEqual(1.0, result["aggregate"]["recall_at_3"]["rate"])
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(0.0, result["aggregate"]["recall_at_3"]["rate"])
         self.assertTrue(result["aggregate"]["all_exact_budget_checks_passed"])
 
     def test_missing_planned_cli_is_an_explicit_preflight_failure(self) -> None:

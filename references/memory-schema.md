@@ -98,6 +98,10 @@ Root entries must be active. A path appears in either the root entries or one to
 
 Choose an entry's primary routing anchor in this order: `component:` → `concept:` → `operation:` → `risk:` → first stable record-type anchor. Use semantic topic shards first. When one topic remains too large, split historical shards by year, then month; keep the root route as one bounded glob such as `indexes/tasks-*.md`.
 
+V3 checks unique canonical IDs, an ID or ID-plus-slug filename, index status, and resolvable references from current.md. Every unresolved conflict must appear there. Snapshot IDs must contain a real date and time. A one-day allowance accommodates legacy local timestamps and clock skew. Indexed versions cannot exceed the committed boundary.
+
+Index status is `scratch` for candidate lessons, tentative decisions or draft handoffs, `deprecated` for deprecated or superseded records, and `archived` for completed, resolved, consumed, rejected and archived records. Open and actionable states map to `active`. Credential detection covers common key formats and private-key headers, including Markdown prose. Source review is still necessary for personal data and credentials in other forms.
+
 ## Status and evidence rules
 
 - Discussion becomes a `Decision` only after an explicit choice source exists.

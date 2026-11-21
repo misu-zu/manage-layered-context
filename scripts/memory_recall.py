@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from memory_validation import record_status, transaction_warnings
 from memory_model import ConfigError, ParsedCall, RecordSyntaxError, load_config, parse_markdown
 
 
@@ -38,6 +39,12 @@ HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
+STOP_WORDS = frozenset(
+    "a an and are as at be by can did do does for from had has have how in into is it its "
+    "of on or our should than that the their there this to was we were what when which who why will with".split()
+)
+
+
 def normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold()
 
@@ -46,6 +53,7 @@ def term_counts(text: str) -> Counter[str]:
     value = normalize(text)
     terms: Counter[str] = Counter()
     for token in ASCII_TOKEN_RE.findall(value):
+        token = token.strip(".:/\\\\_-")
         if len(token) >= 2:
             terms[token] += 1
     for word in WORD_RE.findall(value):
@@ -57,6 +65,8 @@ def term_counts(text: str) -> Counter[str]:
         for size in (2, 3):
             for offset in range(max(len(sequence) - size + 1, 0)):
                 terms[sequence[offset : offset + size]] += 1
+    for word in STOP_WORDS:
+        terms.pop(word, None)
     return terms
 
 
@@ -87,10 +97,14 @@ def _read(path: Path, warnings: list[str]) -> str | None:
 
 def _safe_record_path(root: Path, relative: str, warnings: list[str]) -> Path | None:
     raw = Path(relative)
-    if raw.is_absolute():
+    if raw.is_absolute() or ".." in raw.parts:
         warnings.append(f"skipped absolute indexed path: {relative}")
         return None
-    resolved = (root / raw).resolve()
+    path = root / raw
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent.is_relative_to(root)):
+        warnings.append(f"skipped symbolic link: {relative}")
+        return None
+    resolved = path.resolve()
     try:
         resolved.relative_to(root)
     except ValueError:
@@ -131,100 +145,63 @@ def _route_score(route: ParsedCall, query_terms: Counter[str], query: str) -> fl
     return score
 
 
-def _glob_shards(root: Path, pattern: str, warnings: list[str]) -> list[Path]:
-    posix = pattern.replace("\\", "/")
-    pure = PurePosixPath(posix)
-    if pure.is_absolute() or ".." in pure.parts or not posix.startswith("indexes/"):
-        warnings.append(f"unsafe route glob ignored: {pattern}")
-        return []
-    return sorted(path for path in root.glob(posix) if path.is_file())
-
-
-def _choose_shard(paths: list[Path], query: str, warnings: list[str]) -> list[Path]:
-    if len(paths) <= 1:
-        return paths
+def _index_metadata(root: Path, index: ParsedCall, query: str, warnings: list[str]):
+    entries = {e.fields["path"].replace("\\", "/"): e.fields for e in index.fields["entries"]}
+    boosts: dict[str, float] = {}
+    routes = []
+    skipped_routes = []
+    skipped_shards = []
+    shard_scores: dict[Path, float] = {}
     query_terms = term_counts(query)
-    scored = []
-    for path in paths:
-        name_terms = term_counts(path.stem)
-        score = 2 * sum(min(count, name_terms[term]) for term, count in query_terms.items())
-        text = _read(path, warnings)
-        if text is not None:
-            shard_terms = term_counts(text)
-            score += sum(min(count, shard_terms[term]) for term, count in query_terms.items())
-        scored.append((score, path))
-    positive = [item for item in scored if item[0] > 0]
-    if positive:
-        return [sorted(positive, key=lambda item: (-item[0], item[1].as_posix()))[0][1]]
-    return [sorted(paths)[-1]]
+    for route in index.fields.get("routes", []):
+        fields = route.fields
+        pattern = PurePosixPath(fields["path_glob"].replace("\\", "/"))
+        if len(pattern.parts) != 2 or pattern.parts[0] != "indexes" or ".." in pattern.parts or "**" in pattern.name:
+            warnings.append(f"unsafe route ignored: {fields['route_id']}")
+            skipped_routes.append(fields["route_id"])
+            continue
+        routes.append(fields["route_id"])
+        score = _route_score(route, query_terms, query)
+        matches = [path for path in root.glob(pattern.as_posix()) if path.is_file() and not path.name.startswith("_")]
+        if not matches:
+            warnings.append(f"no shards match route: {fields['route_id']}")
+        for path in matches:
+            shard_scores[path] = max(score, shard_scores.get(path, 0))
+    for path in sorted((root / "indexes").glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        if path not in shard_scores:
+            warnings.append(f"unrouted topic shard: {path.name}")
+            shard_scores[path] = 0
+    for path, score in sorted(shard_scores.items()):
+        relative = path.relative_to(root).as_posix()
+        safe = _safe_record_path(root, relative, warnings)
+        shard = _parse_one(safe, warnings) if safe else None
+        if not shard or shard.name != "TopicIndex":
+            skipped_shards.append(relative)
+            warnings.append(f"could not use topic shard: {relative}")
+            continue
+        for entry in shard.fields["entries"]:
+            relative = entry.fields["path"].replace("\\", "/")
+            entries[relative] = entry.fields
+            boosts[relative] = min(2.0, score * 0.25)
+    return entries, boosts, routes, skipped_routes, skipped_shards
 
 
-def routed_paths(root: Path, query: str, kinds: tuple[str, ...], warnings: list[str]) -> tuple[list[str], list[str]]:
-    """Return candidate record paths and selected v3 route IDs without scanning records."""
-    index = _parse_one(root / "index.md", warnings)
-    if index is None:
-        return [], []
-    allowed_prefixes = tuple(f"{kind}/" for kind in kinds)
-    paths = [
-        entry.fields["path"]
-        for entry in index.fields.get("entries", [])
-        if entry.fields["path"].replace("\\", "/").startswith(allowed_prefixes)
-    ]
-    if index.name == "MemoryIndex":
-        return paths, []
-    if index.name != "ActiveMemoryIndex":
-        warnings.append(f"unsupported index type: {index.name}")
-        return paths, []
-
-    query_terms = term_counts(query)
-    scored = [(_route_score(route, query_terms, query), route) for route in index.fields["routes"]]
-    positive = [item for item in scored if item[0] > 0]
-    chosen = sorted(positive or scored, key=lambda item: (-item[0], item[1].fields["route_id"]))[:1]
-    selected_routes: list[str] = []
-    seen_shards: set[Path] = set()
-    for _, route in chosen:
-        selected_routes.append(route.fields["route_id"])
-        shard_paths = _choose_shard(
-            _glob_shards(root, route.fields["path_glob"], warnings),
-            query,
-            warnings,
-        )
-        for shard_path in shard_paths:
-            resolved = shard_path.resolve()
-            if resolved in seen_shards:
-                continue
-            seen_shards.add(resolved)
-            shard = _parse_one(shard_path, warnings)
-            if shard is None or shard.name != "TopicIndex":
-                warnings.append(f"route target is not a TopicIndex: {shard_path}")
-                continue
-            for entry in shard.fields["entries"]:
-                relative = entry.fields["path"].replace("\\", "/")
-                if relative.startswith(allowed_prefixes):
-                    paths.append(relative)
-    return list(dict.fromkeys(paths)), selected_routes
-
-
-def _legacy_paths(root: Path, kinds: tuple[str, ...], warnings: list[str]) -> list[str]:
+def _canonical_paths(root: Path, kinds: tuple[str, ...]) -> list[str]:
     paths: list[str] = []
     for kind in kinds:
         directory = root / kind
         if not directory.is_dir():
             continue
         for path in sorted(directory.rglob("*.md")):
-            if path.name.startswith("_") or ".staging" in path.parts:
+            if path.name.startswith("_") or path == root / "archive/manifest.md":
                 continue
-            resolved = path.resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                warnings.append(f"skipped path outside memory root: {path}")
-                continue
-            paths.append(resolved.relative_to(root).as_posix())
+            paths.append(path.relative_to(root).as_posix())
     return paths
 
 
-def collect_documents(root: Path, paths: list[str], warnings: list[str]) -> list[dict[str, Any]]:
+def collect_documents(root: Path, paths: list[str], entries: dict, boosts: dict, warnings: list[str]) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for relative in paths:
         resolved = _safe_record_path(root, relative, warnings)
@@ -234,13 +211,26 @@ def collect_documents(root: Path, paths: list[str], warnings: list[str]) -> list
         if text is None:
             continue
         heading = HEADING_RE.search(text)
+        entry = entries.get(relative, {})
+        try:
+            records = parse_markdown(text, relative)
+            status = record_status(records[0]) if len(records) == 1 else None
+        except RecordSyntaxError:
+            status = None
+        if status is None:
+            warnings.append(f"could not determine record status: {relative}")
+        search_text = " ".join((text, relative, entry.get("summary", ""), *entry.get("anchors", [])))
         documents.append(
             {
                 "kind": resolved.relative_to(root).parts[0],
                 "relative_path": resolved.relative_to(root).as_posix(),
                 "title": heading.group(1).strip() if heading else resolved.stem,
-                "normalized": normalize(text),
-                "terms": term_counts(text),
+                "normalized": normalize(search_text),
+                "terms": term_counts(search_text),
+                "status": status,
+                "index_status": entry.get("status"),
+                "snapshot_id": entry.get("record_snapshot_id"),
+                "route_bonus": boosts.get(relative, 0),
             }
         )
     return documents
@@ -258,12 +248,16 @@ def rank(documents: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     ranked: list[dict[str, Any]] = []
     for document in documents:
         matched = set(query_counts) & set(document["terms"])
-        if not matched and query_normalized not in document["normalized"]:
+        if not matched:
             continue
-        score = 0.0
+        score = document["route_bonus"]
         contribution: dict[str, float] = {}
         path_title = normalize(f"{document['relative_path']} {document['title']}")
-        for term in matched:
+        if len(query_counts) > 1 and len(matched) == 1:
+            only = next(iter(matched))
+            if only not in path_title and frequency[only] * 2 >= total and total > 1:
+                continue
+        for term in sorted(matched):
             inverse = math.log((total + 1) / (frequency[term] + 1)) + 1
             query_weight = 1 + math.log1p(query_counts[term])
             identifier_weight = 1.8 if any(char in term for char in ":/\\._-") else 1.0
@@ -275,16 +269,22 @@ def rank(documents: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
             score += 8.0
         if query_normalized and query_normalized in path_title:
             score += 12.0
+        if document["status"] in {"deprecated", "superseded", "rejected"}:
+            score *= 0.55
         ranked.append(
             {
                 "path": document["relative_path"],
                 "kind": document["kind"],
                 "title": document["title"],
+                "status": document["status"],
+                "index_status": document["index_status"],
+                "snapshot_id": document["snapshot_id"],
                 "score": round(score, 3),
                 "matched_terms": sorted(contribution, key=lambda item: (-contribution[item], item))[:12],
             }
         )
-    ranked.sort(key=lambda item: (-item["score"], item["path"]))
+    ranked.sort(key=lambda item: item["path"])
+    ranked.sort(key=lambda item: (item["score"], item["snapshot_id"] or ""), reverse=True)
     return ranked
 
 
@@ -301,6 +301,7 @@ def recall(
     kinds: tuple[str, ...] = DEFAULT_KINDS,
     top: int | None = None,
     expand: bool = False,
+    status: str | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     if not root.is_dir():
@@ -312,23 +313,41 @@ def recall(
     effective_top = top if top is not None else config["retrieval"]["expanded_top_k" if expand else "normal_top_k"]
     if effective_top < 1:
         raise ValueError("top must be at least 1")
-    warnings: list[str] = []
-    if schema_version == 3:
-        paths, selected_routes = routed_paths(root, query, kinds, warnings)
-    else:
-        paths = _legacy_paths(root, kinds, warnings)
-        selected_routes = []
-    documents = collect_documents(root, paths, warnings)
+    warnings = transaction_warnings(root)
+    snapshot = current_snapshot(root)
+    index = _parse_one(root / "index.md", warnings)
+    entries, boosts, routes, skipped_routes, skipped_shards = {}, {}, [], [], []
+    if index and index.name in {"ActiveMemoryIndex", "MemoryIndex"}:
+        entries, boosts, routes, skipped_routes, skipped_shards = _index_metadata(root, index, query, warnings)
+    paths = _canonical_paths(root, kinds)
+    for path in entries:
+        if path.startswith(tuple(f"{kind}/" for kind in kinds)) and not (root / path).is_file():
+            warnings.append(f"indexed record is missing: {path}")
+    documents = collect_documents(root, paths, entries, boosts, warnings)
+    if status:
+        documents = [d for d in documents if status in (d["status"], d["index_status"])]
     candidates = rank(documents, query)[:effective_top]
+    boundary_matches = bool(index and snapshot and index.fields.get("snapshot_id") == snapshot)
+    if not boundary_matches:
+        warnings.append("commit boundary mismatch or unreadable current.md/index.md")
+    if snapshot != current_snapshot(root):
+        boundary_matches = False
+        warnings.append("snapshot changed during recall")
+    warnings = list(dict.fromkeys([*warnings, *transaction_warnings(root)]))
     return {
         "memory_root": str(root),
         "schema_version": schema_version,
-        "snapshot_id": current_snapshot(root),
+        "snapshot_id": snapshot,
         "query": query,
         "kinds": list(kinds),
         "top": effective_top,
         "expanded": expand,
-        "selected_routes": selected_routes,
+        "selected_routes": routes,
+        "unsearched_routes": skipped_routes,
+        "unsearched_shards": skipped_shards,
+        "boundary_matches": boundary_matches,
+        "coverage": "low" if warnings else "complete",
+        "no_confident_match": not candidates,
         "records_considered": len(documents),
         "candidate_count": len(candidates),
         "candidates": candidates,

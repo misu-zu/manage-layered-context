@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,13 +22,17 @@ from memory_model import (
     count_tokens,
     load_config,
     parse_markdown,
+    record_to_data,
+    validate_snapshot,
+    next_snapshot,
 )
-from memory_validation import Findings, primary_anchor, validate_memory
+from memory_validation import Findings, SECRET_PATTERN, primary_anchor, validate_memory
 
 
 LOCK_NAME = ".update-lock"
 STAGING_NAME = ".staging"
 AUDIT_NAME = ".transactions"
+GUARD_NAME = ".txn-guard"
 MODES = ("minimal", "standard", "detailed", "forensic")
 OPERATIONS = (
     "create",
@@ -53,6 +58,28 @@ class SimulatedInterruption(TransactionError):
     """Test-only deterministic interruption after one or more committed writes."""
 
 
+def _exclusive_step(function):
+    """Serialize short CLI steps, including cleanup. OS locks are released on process exit."""
+    @wraps(function)
+    def guarded(root: Path, *args, **kwargs):
+        guard = root / GUARD_NAME
+        if not root.is_dir() or guard.is_symlink():
+            raise TransactionError(f"invalid transaction root or guard: {root}")
+        with guard.open("a+b") as handle:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise TransactionError("another transaction step is running") from exc
+            return function(root, *args, **kwargs)
+    return guarded
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -67,12 +94,20 @@ def _sha256(path: Path) -> str:
 
 def _json_write(path: Path, value: Any, *, exclusive: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "x" if exclusive else "w"
-    with path.open(mode, encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    fd, raw = tempfile.mkstemp(dir=path.parent, prefix=".memoryctl-", suffix=".tmp")
+    temp = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if exclusive:
+            os.link(temp, path)
+        else:
+            os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _json_read(path: Path) -> dict[str, Any]:
@@ -94,9 +129,14 @@ def _safe_relative(root: Path, raw: str) -> tuple[str, Path]:
         raise TransactionError(f"invalid transaction path: {raw}")
     if any(part in {"", ".", ".."} for part in PureParts(normalized)):
         raise TransactionError(f"transaction path contains unsafe segments: {raw}")
-    if normalized == LOCK_NAME or normalized.startswith(f"{STAGING_NAME}/") or normalized.startswith(f"{AUDIT_NAME}/"):
+    if path.parts[0] in {LOCK_NAME, STAGING_NAME, AUDIT_NAME, GUARD_NAME}:
         raise TransactionError(f"transaction cannot target control path: {raw}")
-    candidate = (root / Path(normalized)).resolve()
+    candidate = root
+    for part in path.parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise TransactionError(f"transaction target cannot be a symbolic link: {raw}")
+    candidate = candidate.resolve()
     try:
         candidate.relative_to(root)
     except ValueError as exc:
@@ -126,15 +166,21 @@ def committed_snapshot(root: Path) -> str:
     return current
 
 
-def _mode_allows(mode: str, operation: str, files: list[str]) -> None:
+def _mode_allows(mode: str, operation: str, files: list[str], *, deletes: bool = False) -> list[str]:
     if mode not in MODES:
         raise TransactionError(f"unknown record mode: {mode}")
     if operation not in OPERATIONS:
         raise TransactionError(f"unknown transaction operation: {operation}")
     if operation in HIGH_RISK_OPERATIONS and mode != "forensic":
         raise TransactionError(f"operation {operation} requires forensic mode")
-    if operation in DETAILED_OPERATIONS and mode not in {"detailed", "forensic"}:
-        raise TransactionError(f"operation {operation} requires detailed or forensic mode")
+    operations = {operation}
+    if deletes:
+        operations.add("delete")
+    if any(path.startswith("archive/") for path in files):
+        operations.add("archive")
+    restricted = operations & DETAILED_OPERATIONS
+    if restricted and mode not in {"detailed", "forensic"}:
+        raise TransactionError(f"operation {', '.join(sorted(restricted))} requires detailed or forensic mode")
     if mode == "minimal":
         if operation not in {"create", "update"}:
             raise TransactionError("minimal mode allows only create or update")
@@ -148,51 +194,101 @@ def _mode_allows(mode: str, operation: str, files: list[str]) -> None:
         ]
         if len(details) > 1:
             raise TransactionError("minimal mode allows at most one canonical detail record")
-        if any(path.startswith("archive/") for path in files):
-            raise TransactionError("minimal mode cannot archive records")
+    return sorted(operations)
 
 
 def _transaction_paths(root: Path, patch_id: str) -> tuple[Path, Path, Path]:
+    if not re.fullmatch(r"PATCH-[A-Za-z0-9._-]+", patch_id):
+        raise TransactionError("invalid patch_id")
+    for path in (root / LOCK_NAME, root / STAGING_NAME, root / STAGING_NAME / patch_id, root / AUDIT_NAME):
+        if path.is_symlink():
+            raise TransactionError(f"symbolic link in transaction control path: {path}")
     lock = root / LOCK_NAME
     staging = root / STAGING_NAME / patch_id
     manifest = staging / "manifest.json"
     return lock, staging, manifest
 
 
-def begin_transaction(
-    root: Path,
-    *,
-    patch_id: str,
-    mode: str,
-    operation: str,
-    target_snapshot_id: str,
-    files: Iterable[str],
-    delete_files: Iterable[str] = (),
-    owner: str = "memoryctl",
-) -> dict[str, Any]:
-    root = root.resolve()
-    if not root.is_dir():
-        raise TransactionError(f"memory root does not exist: {root}")
-    if not re.fullmatch(r"PATCH-[A-Za-z0-9._-]+", patch_id):
-        raise TransactionError("patch_id must start with PATCH- and contain only safe identifier characters")
-    normalized_files: list[str] = []
+def _declared_paths(root: Path, files: Iterable[str], delete_files: Iterable[str]) -> tuple[dict[str, Path], set[str]]:
     targets: dict[str, Path] = {}
     delete_set: set[str] = set()
+    delete_files = list(delete_files)
     for raw in [*files, *delete_files]:
         normalized, target = _safe_relative(root, raw)
         if normalized in targets:
             raise TransactionError(f"duplicate transaction path: {normalized}")
-        normalized_files.append(normalized)
         targets[normalized] = target
     for raw in delete_files:
         normalized, _ = _safe_relative(root, raw)
         delete_set.add(normalized)
     if delete_set & CONTROL_PATHS:
         raise TransactionError("current.md and index.md cannot be deleted")
+    return targets, delete_set
+
+
+def _stage_entries(staging: Path, targets: dict[str, Path], delete_set: set[str]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for relative, target in targets.items():
+        if target.exists() and not target.is_file():
+            raise TransactionError(f"transaction target is not a regular file: {relative}")
+        if target.is_file() and SECRET_PATTERN.search(target.read_bytes()):
+            raise TransactionError(f"{relative}: possible credential or private key in original file")
+        _, staged = _safe_relative(staging / "files", relative)
+        before = _sha256(target) if target.is_file() else None
+        change = "delete" if relative in delete_set else "update" if target.exists() else "create"
+        if change == "delete":
+            if before is None:
+                raise TransactionError(f"delete target does not exist: {relative}")
+        else:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_file():
+                shutil.copy2(target, staged)
+            else:
+                staged.write_bytes(b"")
+        entries.append(
+            {
+                "path": relative,
+                "change": change,
+                "before_sha256": before,
+                "staged_sha256": None,
+                "after_sha256": None,
+            }
+        )
+    return entries
+
+
+@_exclusive_step
+def begin_transaction(
+    root: Path,
+    *,
+    patch_id: str,
+    mode: str,
+    operation: str,
+    target_snapshot_id: str | None,
+    files: Iterable[str],
+    delete_files: Iterable[str] = (),
+    owner: str = "memoryctl",
+    expected_base: str | None = None,
+) -> dict[str, Any]:
+    root = root.resolve()
+    if not root.is_dir():
+        raise TransactionError(f"memory root does not exist: {root}")
+    if not re.fullmatch(r"PATCH-[A-Za-z0-9._-]+", patch_id):
+        raise TransactionError("patch_id must start with PATCH- and contain only safe identifier characters")
+    targets, delete_set = _declared_paths(root, files, delete_files)
     if not CONTROL_PATHS.issubset(targets):
         raise TransactionError("every memory transaction must stage both current.md and index.md")
-    _mode_allows(mode, operation, normalized_files)
+    operations = _mode_allows(mode, operation, list(targets), deletes=bool(delete_set))
     base_snapshot_id = committed_snapshot(root)
+    if expected_base is not None and base_snapshot_id != expected_base:
+        raise TransactionError("committed snapshot changed after planning the transaction")
+    auto_target = target_snapshot_id is None
+    try:
+        if auto_target:
+            target_snapshot_id = next_snapshot(base_snapshot_id)
+        validate_snapshot(target_snapshot_id)
+    except ValueError as exc:
+        raise TransactionError(str(exc)) from exc
     if target_snapshot_id <= base_snapshot_id:
         raise TransactionError(
             f"target snapshot must sort after base: base={base_snapshot_id} target={target_snapshot_id}"
@@ -200,7 +296,8 @@ def begin_transaction(
 
     lock_path, staging, manifest_path = _transaction_paths(root, patch_id)
     lock = {
-        "version": 1,
+        "version": 2,
+        "phase": "preparing",
         "patch_id": patch_id,
         "owner": owner,
         "mode": mode,
@@ -214,53 +311,64 @@ def begin_transaction(
     except FileExistsError as exc:
         raise TransactionError(f"update lock already exists: {lock_path}") from exc
 
+    created = False
     try:
+        if not (root / "config.json").exists() and "config.json" in targets and mode != "forensic":
+            raise TransactionError("changing the memory schema requires forensic mode")
+        if committed_snapshot(root) != base_snapshot_id:
+            raise TransactionError("committed snapshot changed while acquiring lock")
+        if staging.parent.is_dir() and any(staging.parent.iterdir()):
+            raise TransactionError("previous staging evidence exists; inspect recovery state")
+        if (root / AUDIT_NAME / patch_id).exists():
+            raise TransactionError("retained audit already exists for this patch")
         staging.mkdir(parents=True, exist_ok=False)
-        entries: list[dict[str, Any]] = []
-        for relative in normalized_files:
-            target = targets[relative]
-            if target.exists() and not target.is_file():
-                raise TransactionError(f"transaction target is not a regular file: {relative}")
-            if target.is_symlink():
-                raise TransactionError(f"transaction target cannot be a symbolic link: {relative}")
-            staged = staging / "files" / Path(relative)
-            before = _sha256(target) if target.is_file() else None
-            change = "delete" if relative in delete_set else "update" if target.exists() else "create"
-            if change == "delete":
-                if before is None:
-                    raise TransactionError(f"delete target does not exist: {relative}")
-            else:
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                if target.is_file():
-                    shutil.copy2(target, staged)
-                else:
-                    staged.touch()
-            entries.append(
-                {
-                    "path": relative,
-                    "change": change,
-                    "before_sha256": before,
-                    "staged_sha256": None,
-                    "after_sha256": None,
-                }
-            )
+        created = True
+        entries = _stage_entries(staging, targets, delete_set)
+        if auto_target:
+            for relative in sorted(CONTROL_PATHS):
+                path = staging / "files" / relative
+                call = _record(path)
+                call.fields["snapshot_id"] = target_snapshot_id
+                if relative == "current.md":
+                    call.fields["last_updated"] = _now()
+                path.write_text(replace_record(path.read_text(encoding="utf-8"), call), encoding="utf-8", newline="\n")
         manifest = {
             **lock,
             "status": "prepared",
+            "operations": operations,
             "started_at": _now(),
             "files": entries,
             "writes_completed": 0,
             "validation": None,
         }
         _json_write(manifest_path, manifest)
+        _json_write(lock_path, {**lock, "phase": "prepared"})
         return manifest
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        if created:
+            shutil.rmtree(staging, ignore_errors=True)
         try:
             lock_path.unlink()
         except OSError:
             pass
         raise
+
+
+@_exclusive_step
+def add_transaction_files(root: Path, patch_id: str, files: Iterable[str], delete_files: Iterable[str] = ()) -> dict[str, Any]:
+    root = root.resolve()
+    _, staging, manifest_path, _, manifest = _load_active(root, patch_id)
+    if manifest["status"] != "prepared" or not _matches_before(root, manifest):
+        raise TransactionError("can only extend a prepared transaction at its original base")
+    targets, deletes = _declared_paths(root, files, delete_files)
+    existing = [entry["path"] for entry in manifest["files"]]
+    if not targets or set(existing).intersection(targets):
+        raise TransactionError("txn add needs new, undeclared paths")
+    has_deletes = bool(deletes) or any(entry["change"] == "delete" for entry in manifest["files"])
+    manifest["operations"] = _mode_allows(manifest["mode"], manifest["operation"], [*existing, *targets], deletes=has_deletes)
+    manifest["files"].extend(_stage_entries(staging, targets, deletes))
+    _json_write(manifest_path, manifest)
+    return manifest
 
 
 def staged_path(root: Path, patch_id: str, relative: str) -> Path:
@@ -273,7 +381,7 @@ def staged_path(root: Path, patch_id: str, relative: str) -> Path:
         raise TransactionError(f"path is not part of transaction {patch_id}: {normalized}")
     if entries[normalized]["change"] == "delete":
         raise TransactionError(f"delete target has no staged content: {normalized}")
-    return staging / "files" / Path(normalized)
+    return _safe_relative(staging / "files", normalized)[1]
 
 
 def write_staged(root: Path, patch_id: str, relative: str, content: str) -> Path:
@@ -383,7 +491,7 @@ def _effective_root(root: Path, staging: Path, manifest: dict[str, Any], temp: P
     shutil.copytree(
         root,
         effective,
-        ignore=shutil.ignore_patterns(LOCK_NAME, STAGING_NAME, AUDIT_NAME),
+        ignore=shutil.ignore_patterns(LOCK_NAME, STAGING_NAME, AUDIT_NAME, GUARD_NAME),
     )
     for entry in manifest["files"]:
         target = effective / Path(entry["path"])
@@ -426,6 +534,11 @@ def _order(entry: dict[str, Any]) -> tuple[int, str]:
 def _validate_staged(root: Path, staging: Path, manifest: dict[str, Any]) -> Findings:
     current = staging / "files" / "current.md"
     index = staging / "files" / "index.md"
+    for entry in manifest["files"]:
+        if entry["change"] != "delete":
+            _, staged = _safe_relative(staging / "files", entry["path"])
+            if SECRET_PATTERN.search(staged.read_bytes()):
+                raise TransactionError(f"{entry['path']}: possible credential or private key in staged file")
     current_snapshot = _snapshot(current)
     index_snapshot = _snapshot(index)
     target = manifest["target_snapshot_id"]
@@ -436,21 +549,54 @@ def _validate_staged(root: Path, staging: Path, manifest: dict[str, Any]) -> Fin
     with tempfile.TemporaryDirectory(prefix="memoryctl-effective-") as raw_temp:
         effective = _effective_root(root, staging, manifest, Path(raw_temp))
         _, schema_version = load_config(effective)
+        _, base_schema = load_config(root)
+        if base_schema != schema_version and manifest["mode"] != "forensic":
+            raise TransactionError("changing the memory schema requires forensic mode")
+        changed = {
+            entry["path"] for entry in manifest["files"]
+            if entry["change"] == "delete" or _sha256(staging / "files" / entry["path"]) != entry["before_sha256"]
+        }
         findings = validate_memory(
             effective,
             strict_v3=schema_version == 3,
             logical_root=root,
+            budget_paths=None if "config.json" in changed else changed,
         )
-        if schema_version == 3:
+        if schema_version == 3 and findings.ok:
             indexed_snapshots: dict[str, str] = {}
-            for index_path in [effective / "index.md", *sorted((effective / "indexes").rglob("*.md"))]:
-                if not index_path.is_file() or index_path.name.startswith("_"):
+            before_locations = {}
+            after_locations = {}
+            for index_path in [effective / "index.md", *sorted((effective / "indexes").glob("*.md"))]:
+                if index_path.name.startswith("_"):
                     continue
+                location = index_path.relative_to(effective).as_posix()
                 index_call = _record(index_path)
-                for entry in index_call.fields.get("entries", []):
-                    indexed_snapshots[entry.fields["path"].replace("\\", "/")] = entry.fields[
-                        "record_snapshot_id"
-                    ]
+                if location in changed and index_call.fields["snapshot_id"] != target:
+                    findings.errors.append(f"changed topic shard must use target snapshot: {location}")
+                for entry in index_call.fields["entries"]:
+                    path = entry.fields["path"].replace("\\", "/")
+                    indexed_snapshots[path] = entry.fields["record_snapshot_id"]
+                    after_locations[path] = location
+            reorg = False
+            if base_schema == 3:
+                for location in changed:
+                    if location != "index.md" and not location.startswith("indexes/"):
+                        continue
+                    old = root / location
+                    if not old.is_file() or old.name.startswith("_"):
+                        continue
+                    before = _record(old)
+                    for item in before.fields["entries"]:
+                        before_locations[item.fields["path"].replace("\\", "/")] = location
+                    if location == "index.md":
+                        old_routes = [record_to_data(r) for r in before.fields["routes"]]
+                        new_routes = [record_to_data(r) for r in _record(index).fields["routes"]]
+                        reorg = old_routes != new_routes
+                moved = any(after_locations[p] != location for p, location in before_locations.items() if p in after_locations)
+                if reorg or moved:
+                    if manifest["mode"] not in {"detailed", "forensic"}:
+                        raise TransactionError("changing routes or moving indexed entries requires detailed or forensic mode")
+                    manifest["operations"] = sorted({*manifest["operations"], "index_reorg"})
             canonical_prefixes = (
                 "decisions/",
                 "issues/",
@@ -483,10 +629,24 @@ def _retain_audit(root: Path, staging: Path, manifest: dict[str, Any]) -> None:
     if manifest["mode"] not in {"detailed", "forensic"}:
         return
     audit = root / AUDIT_NAME / manifest["patch_id"]
-    audit.mkdir(parents=True, exist_ok=False)
-    _json_write(audit / "manifest.json", manifest)
-    if manifest["mode"] == "forensic" and (staging / "backups").is_dir():
-        shutil.copytree(staging / "backups", audit / "backups")
+    audit.parent.mkdir(exist_ok=True)
+    if audit.is_dir():
+        previous = _json_read(audit / "manifest.json")
+        if previous["files"] == manifest["files"] and previous["target_snapshot_id"] == manifest["target_snapshot_id"]:
+            return
+        raise TransactionError("retained audit conflicts with active transaction")
+    with tempfile.TemporaryDirectory(prefix=".audit-", dir=staging) as tmp:
+        pending = Path(tmp) / "audit"
+        _json_write(pending / "manifest.json", manifest)
+        for entry in manifest["files"]:
+            if entry["change"] == "delete":
+                deleted = staging / "deleted" / entry["path"]
+                if _sha256(deleted) != entry["before_sha256"]:
+                    raise TransactionError(f"deleted contents differ from before hash: {entry['path']}")
+                _atomic_copy(deleted, pending / "deleted" / entry["path"])
+        if manifest["mode"] == "forensic" and (staging / "backups").is_dir():
+            shutil.copytree(staging / "backups", pending / "backups")
+        pending.rename(audit)
 
 
 def _load_active(root: Path, patch_id: str) -> tuple[Path, Path, Path, dict[str, Any], dict[str, Any]]:
@@ -495,11 +655,12 @@ def _load_active(root: Path, patch_id: str) -> tuple[Path, Path, Path, dict[str,
     manifest = _json_read(manifest_path)
     if lock.get("patch_id") != patch_id or manifest.get("patch_id") != patch_id:
         raise TransactionError("lock or manifest belongs to a different patch")
-    if lock.get("target_snapshot_id") != manifest.get("target_snapshot_id"):
+    if any(lock.get(key) != manifest.get(key) for key in ("target_snapshot_id", "base_snapshot_id", "mode", "operation")):
         raise TransactionError("lock and manifest target snapshots differ")
     return lock_path, staging, manifest_path, lock, manifest
 
 
+@_exclusive_step
 def commit_transaction(root: Path, patch_id: str, *, fail_after: int | None = None) -> dict[str, Any]:
     root = root.resolve()
     lock_path, staging, manifest_path, _, manifest = _load_active(root, patch_id)
@@ -508,6 +669,12 @@ def commit_transaction(root: Path, patch_id: str, *, fail_after: int | None = No
     if committed_snapshot(root) != manifest["base_snapshot_id"]:
         raise TransactionError("committed snapshot changed after transaction began")
 
+    paths = [entry["path"] for entry in manifest["files"] if entry["change"] != "delete"]
+    deletes = [entry["path"] for entry in manifest["files"] if entry["change"] == "delete"]
+    targets, _ = _declared_paths(root, paths, deletes)
+    manifest["operations"] = _mode_allows(manifest["mode"], manifest["operation"], list(targets), deletes=bool(deletes))
+    if not _matches_before(root, manifest):
+        raise TransactionError("committed files changed after transaction began")
     _ensure_patch_record(root, staging, manifest)
     findings = _validate_staged(root, staging, manifest)
     manifest["validation"] = findings.as_dict()
@@ -564,17 +731,23 @@ def commit_transaction(root: Path, patch_id: str, *, fail_after: int | None = No
         manifest["committed_at"] = _now()
         _json_write(manifest_path, manifest)
         _retain_audit(root, staging, manifest)
-        shutil.rmtree(staging)
-        lock_path.unlink()
-        parent = root / STAGING_NAME
-        if parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
+        _finish_cleanup(lock_path, staging, manifest, "committed")
         return manifest
     except Exception:
         manifest["status"] = "recovery_required"
         manifest["writes_completed"] = writes
-        _json_write(manifest_path, manifest)
+        if manifest_path.is_file():
+            _json_write(manifest_path, manifest)
         raise
+
+
+def _finish_cleanup(lock_path: Path, staging: Path, manifest: dict, status: str) -> None:
+    # Keep checked hashes until both staging removal and lock release are complete.
+    _json_write(lock_path, {**manifest, "phase": "cleanup", "status": status})
+    shutil.rmtree(staging)
+    lock_path.unlink()
+    if not any(staging.parent.iterdir()):
+        staging.parent.rmdir()
 
 
 def _matches_before(root: Path, manifest: dict[str, Any]) -> bool:
@@ -602,6 +775,7 @@ def _matches_staged(root: Path, manifest: dict[str, Any]) -> bool:
     return True
 
 
+@_exclusive_step
 def abort_transaction(root: Path, patch_id: str) -> dict[str, Any]:
     root = root.resolve()
     lock_path, staging, _, _, manifest = _load_active(root, patch_id)
@@ -609,16 +783,41 @@ def abort_transaction(root: Path, patch_id: str) -> dict[str, Any]:
         raise TransactionError("only a prepared transaction can be aborted")
     if committed_snapshot(root) != manifest["base_snapshot_id"] or not _matches_before(root, manifest):
         raise TransactionError("committed files changed; use recover instead of abort")
-    shutil.rmtree(staging)
-    lock_path.unlink()
-    parent = root / STAGING_NAME
-    if parent.is_dir() and not any(parent.iterdir()):
-        parent.rmdir()
+    _finish_cleanup(lock_path, staging, manifest, "aborted")
     return {"patch_id": patch_id, "status": "aborted", "snapshot_id": manifest["base_snapshot_id"]}
 
 
+@_exclusive_step
 def recover_transaction(root: Path, patch_id: str) -> dict[str, Any]:
     root = root.resolve()
+    lock_path, staging, manifest_path = _transaction_paths(root, patch_id)
+    lock = _json_read(lock_path)
+    if lock.get("patch_id") != patch_id:
+        raise TransactionError("lock belongs to a different patch")
+    if lock.get("phase") == "cleanup":
+        status = lock["status"]
+        if status == "committed":
+            verified = committed_snapshot(root) == lock["target_snapshot_id"] and _matches_staged(root, lock)
+        else:
+            verified = status == "aborted" and committed_snapshot(root) == lock["base_snapshot_id"] and _matches_before(root, lock)
+        if not verified:
+            raise TransactionError("ambiguous cleanup; lock retained")
+        if staging.exists():
+            shutil.rmtree(staging)
+        lock_path.unlink()
+        return {"patch_id": patch_id, "status": status, "disposition": "finished_cleanup"}
+    if not manifest_path.exists():
+        if lock.get("phase") != "preparing" or lock.get("version") != 2:
+            raise TransactionError("cannot verify owner of incomplete transaction")
+        if committed_snapshot(root) != lock.get("base_snapshot_id"):
+            raise TransactionError("ambiguous incomplete transaction; lock retained")
+        # Before the prepared manifest is published only initial staged file copies can exist.
+        if staging.exists():
+            if any(child.name != "files" and not child.match(".memoryctl-*.tmp") for child in staging.iterdir()):
+                raise TransactionError("ambiguous incomplete transaction; staging and lock retained")
+            shutil.rmtree(staging)
+        lock_path.unlink()
+        return {"patch_id": patch_id, "status": "aborted", "disposition": "clean_base"}
     lock_path, staging, manifest_path, _, manifest = _load_active(root, patch_id)
     current = _snapshot(root / "current.md")
     index = _snapshot(root / "index.md")
@@ -632,12 +831,10 @@ def recover_transaction(root: Path, patch_id: str) -> dict[str, Any]:
             entry["after_sha256"] = None if entry["change"] == "delete" else _sha256(target_path)
         _json_write(manifest_path, manifest)
         _retain_audit(root, staging, manifest)
-        shutil.rmtree(staging)
-        lock_path.unlink()
+        _finish_cleanup(lock_path, staging, manifest, "committed")
         return {"patch_id": patch_id, "status": "committed", "disposition": "finalized_target"}
     if current == base and index == base and _matches_before(root, manifest):
-        shutil.rmtree(staging)
-        lock_path.unlink()
+        _finish_cleanup(lock_path, staging, manifest, "aborted")
         return {"patch_id": patch_id, "status": "aborted", "disposition": "clean_base"}
     manifest["status"] = "recovery_required"
     manifest["recovery_diagnosis"] = {
@@ -676,13 +873,15 @@ def _upgrade_v3_identifier_fields(path: Path) -> str | None:
         changed = True
     if not changed:
         return None
-    text = path.read_text(encoding="utf-8")
+    return replace_record(path.read_text(encoding="utf-8"), ParsedCall(call.name, fields, call.line))
+
+
+def replace_record(text: str, call: ParsedCall) -> str:
     matches = list(PYTHON_FENCE_RE.finditer(text))
     if len(matches) != 1:
-        raise TransactionError(f"expected one Python record block in {path}")
+        raise TransactionError("expected one Python record block")
     match = matches[0]
-    replacement = f"```python\n{_render_call(ParsedCall(call.name, fields, call.line))}\n```"
-    return text[: match.start()] + replacement + text[match.end() :]
+    return text[:match.start(1)] + _render_call(call) + "\n" + text[match.end(1):]
 
 
 def _migration_record_upgrades(root: Path) -> dict[str, str]:
@@ -768,6 +967,7 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
     if schema_version != 2:
         raise TransactionError("migration requires a v2 root without config.json")
     base = committed_snapshot(root)
+    validate_snapshot(target_snapshot_id)
     if target_snapshot_id <= base:
         raise TransactionError("migration target snapshot must sort after the v2 base")
     index = _record(root / "index.md")
@@ -794,13 +994,16 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
         historical.setdefault((kind, anchor_group, _date_bucket(entry.fields["path"])), []).append(entry)
 
     shard_specs: list[tuple[str, ParsedCall]] = []
-    route_kinds: dict[str, list[str]] = {}
+    route_groups: dict[str, str] = {}
     for (kind, anchor_group, bucket), entries in sorted(historical.items()):
+        namespace = anchor_group.partition(":")[0]
+        family = namespace if namespace in {"component", "concept", "operation", "risk"} else kind
+        route_groups[family] = namespace + ":" if family == namespace else f"{kind.rstrip('s')}:"
+        digest = hashlib.sha256(anchor_group.encode("utf-8")).hexdigest()[:10]
         chunks = _chunk_topic_entries(kind, anchor_group, bucket, entries, target_snapshot_id)
         for chunk_index, chunk in enumerate(chunks, start=1):
             suffix = f"-{chunk_index:03d}" if len(chunks) > 1 else ""
-            filename = f"{_slug(kind)}-{_slug(anchor_group)}-{_slug(bucket)}{suffix}.md"
-            route_kinds.setdefault(kind, []).append(filename)
+            filename = f"{family}-{_slug(anchor_group)[:48]}-{digest}-{kind}-{bucket}{suffix}.md"
             anchors = sorted({primary_anchor(entry.fields["anchors"]) for entry in chunk})
             shard_specs.append(
                 (
@@ -809,7 +1012,7 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
                         "TopicIndex",
                         {
                             "topic_id": (
-                                f"topic:{_slug(kind)}:{_slug(anchor_group)}:"
+                                f"topic:{kind}:{anchor_group}:"
                                 f"{_slug(bucket)}:{chunk_index:03d}"
                             ),
                             "snapshot_id": target_snapshot_id,
@@ -838,19 +1041,19 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
                 ),
             )
         )
-        route_kinds["general"] = ["general.md"]
+        route_groups["general"] = "concept:"
 
     routes: list[ParsedCall] = []
-    for kind in sorted(route_kinds):
-        pattern = f"indexes/{_slug(kind)}-*.md" if kind != "general" else "indexes/general.md"
+    for kind, prefix in sorted(route_groups.items()):
+        pattern = f"indexes/{_slug(kind)}-*.md" if kind != "general" else "indexes/general*.md"
         routes.append(
             ParsedCall(
                 "IndexRoute",
                 {
                     "route_id": f"route:{_slug(kind)}",
-                    "anchor_prefixes": [f"{_slug(kind.rstrip('s'))}:"],
+                    "anchor_prefixes": [prefix],
                     "path_glob": pattern,
-                    "summary": f"Route {_slug(kind)} history to bounded topic shards.",
+                    "summary": f"History grouped by {kind} anchor, record family and date.",
                     "status_scope": ["active", "archived", "deprecated", "scratch"],
                 },
                 1,
@@ -862,6 +1065,15 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
         1,
     )
     current = _replace_snapshot(_record(root / "current.md"), target_snapshot_id)
+    for path in sorted((root / "conflicts").rglob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        conflict = _record(path)
+        if conflict.fields["resolution_status"] == "unresolved":
+            identifier = conflict.fields["id"]
+            names = {identifier, f"conflict:{identifier}", path.relative_to(root).as_posix(), *conflict.fields["anchors"]}
+            if names.isdisjoint(current.fields["unresolved_conflicts"]):
+                current.fields["unresolved_conflicts"].append(f"conflict:{identifier}")
     files = [
         "config.json",
         "current.md",
@@ -873,7 +1085,7 @@ def plan_v2_migration(root: Path, target_snapshot_id: str) -> dict[str, Any]:
         "base_snapshot_id": base,
         "target_snapshot_id": target_snapshot_id,
         "files": files,
-        "current": render_markdown("Current Project Memory", current),
+        "current": replace_record((root / "current.md").read_text(encoding="utf-8"), current),
         "index": render_markdown(
             "Active Memory Index",
             active_index,
@@ -924,6 +1136,7 @@ def migrate_v2_to_v3(
         target_snapshot_id=target_snapshot_id,
         files=plan["files"],
         owner="memoryctl:migrate",
+        expected_base=plan["base_snapshot_id"],
     )
     write_staged(root, patch_id, "config.json", plan["config"])
     write_staged(root, patch_id, "current.md", plan["current"])
